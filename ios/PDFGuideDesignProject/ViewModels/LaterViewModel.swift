@@ -66,6 +66,18 @@ final class LaterViewModel {
                 "https://images.unsplash.com/photo-1475483768296-6163e08872a1?w=400",
                 "https://images.unsplash.com/photo-1551632811-561732d1e306?w=400"
             ],
+            videos: [
+                VideoAttachment(
+                    thumbnailURL: "https://images.unsplash.com/photo-1504280390367-361c6d9f38f4?w=400",
+                    title: "Sunset at the Lake",
+                    duration: "0:47"
+                ),
+                VideoAttachment(
+                    thumbnailURL: "https://images.unsplash.com/photo-1523987355523-c7b5b0dd90a7?w=400",
+                    title: "Bonfire Vibes",
+                    duration: "1:23"
+                )
+            ],
             chatLog: [
                 ChatMessage(time: "2:45 P.M.", username: "Samantherr", message: "Just arrived 🎉"),
                 ChatMessage(time: "5:17 P.M.", username: "Kool-Aidd", message: "Showed off my fifty people #GOAT"),
@@ -76,6 +88,19 @@ final class LaterViewModel {
                 songTitle: "Summer Nights",
                 artist: "SZA",
                 albumArtURL: "https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?w=200"
+            ),
+            playlist: PlaylistAttachment(
+                name: "Poconos Weekend Mix",
+                source: .spotify,
+                coverURL: "https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?w=300",
+                tracks: [
+                    PlaylistTrack(title: "Summer Nights", artist: "SZA", albumArtURL: "https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?w=100", duration: "3:42"),
+                    PlaylistTrack(title: "HUMBLE.", artist: "Kendrick Lamar", albumArtURL: "https://images.unsplash.com/photo-1571330735066-03aaa9429d89?w=100", duration: "2:57"),
+                    PlaylistTrack(title: "Blinding Lights", artist: "The Weeknd", albumArtURL: "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=100", duration: "3:20"),
+                    PlaylistTrack(title: "Good Days", artist: "SZA", albumArtURL: "https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?w=100", duration: "4:39"),
+                    PlaylistTrack(title: "Levitating", artist: "Dua Lipa", albumArtURL: "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=100", duration: "3:23")
+                ],
+                externalURL: "https://open.spotify.com"
             )
         )
 
@@ -106,11 +131,28 @@ final class LaterViewModel {
                 "https://images.unsplash.com/photo-1534430480872-3498386e7856?w=400",
                 "https://images.unsplash.com/photo-1496442226666-8d4d0e62e6e9?w=400"
             ],
+            videos: [
+                VideoAttachment(
+                    thumbnailURL: "https://images.unsplash.com/photo-1534430480872-3498386e7856?w=400",
+                    title: "Fireworks Finale",
+                    duration: "2:11"
+                )
+            ],
             chatLog: [
                 ChatMessage(time: "7:00 P.M.", username: "Samantherr", message: "Where is everyone??"),
                 ChatMessage(time: "7:15 P.M.", username: "Jay", message: "Coming up from the subway now"),
                 ChatMessage(time: "9:30 P.M.", username: "Samantherr", message: "Best fireworks ever 🎆")
-            ]
+            ],
+            playlist: PlaylistAttachment(
+                name: "NYC Vibes 🗽",
+                source: .appleMusic,
+                coverURL: "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=300",
+                tracks: [
+                    PlaylistTrack(title: "Empire State of Mind", artist: "JAY-Z ft. Alicia Keys", duration: "4:37"),
+                    PlaylistTrack(title: "New York, New York", artist: "Frank Sinatra", duration: "3:26")
+                ],
+                externalURL: "https://music.apple.com"
+            )
         )
 
         let tokyoPins: [MemoryPin] = [
