@@ -1,6 +1,7 @@
 import Foundation
 import CoreLocation
 import SwiftUI
+import MapKit
 
 @Observable
 final class LaterViewModel {
@@ -10,6 +11,8 @@ final class LaterViewModel {
     var timelineProgress: Double = 0.0
     var selectedTab: Tab = .explore
 
+    var allConnections: [Connection] = []
+
     enum Tab: String {
         case explore
         case timeCapsules
@@ -17,10 +20,94 @@ final class LaterViewModel {
     }
 
     init() {
+        loadSampleConnections()
         loadSampleData()
     }
 
+    private func loadSampleConnections() {
+        allConnections = [
+            Connection(username: "Kool-Aidd", displayName: "Kool-Aidd", avatarColor: .purple),
+            Connection(username: "Trist0", displayName: "Trist0", avatarColor: .orange),
+            Connection(username: "AkaWild", displayName: "AkaWild", avatarColor: .green),
+            Connection(username: "Jay", displayName: "Jay", avatarColor: .teal),
+            Connection(username: "Sarah", displayName: "Sarah", avatarColor: .pink),
+            Connection(username: "Mike", displayName: "Mike", avatarColor: .blue),
+        ]
+    }
+
+    func addMemory(_ memory: Memory) {
+        memories.insert(memory, at: 0)
+        rebuildGlobalPins()
+    }
+
+    func updateMemory(_ memory: Memory) {
+        guard let index = memories.firstIndex(where: { $0.id == memory.id }) else { return }
+        memories[index] = memory
+        rebuildGlobalPins()
+    }
+
+    func addComment(to memoryID: UUID, comment: Comment) {
+        guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        memories[index].comments.append(comment)
+    }
+
+    func addPhotoURL(to memoryID: UUID, url: String) {
+        guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        memories[index].photoURLs.append(url)
+    }
+
+    func setPlaylist(for memoryID: UUID, playlist: PlaylistAttachment) {
+        guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        memories[index].playlist = playlist
+    }
+
+    func addConnection(to memoryID: UUID, connection: Connection) {
+        guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        if !memories[index].connections.contains(where: { $0.id == connection.id }) {
+            memories[index].connections.append(connection)
+            if !memories[index].creators.contains(connection.username) {
+                memories[index].creators.append(connection.username)
+            }
+        }
+    }
+
+    func removeConnection(from memoryID: UUID, connection: Connection) {
+        guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        memories[index].connections.removeAll { $0.id == connection.id }
+        memories[index].creators.removeAll { $0 == connection.username }
+    }
+
+    func memory(for pin: MemoryPin) -> Memory? {
+        memories.first { memory in
+            memory.pins.contains { $0.id == pin.id }
+        }
+    }
+
+    func memoryByID(_ id: UUID) -> Memory? {
+        memories.first { $0.id == id }
+    }
+
+    private func rebuildGlobalPins() {
+        globalPins = memories.flatMap { memory in
+            memory.pins.map { pin in
+                MemoryPin(
+                    id: pin.id,
+                    coordinate: pin.coordinate,
+                    title: memory.title,
+                    date: pin.date,
+                    imageURL: pin.imageURL,
+                    intensity: pin.intensity
+                )
+            }
+        }
+    }
+
     private func loadSampleData() {
+        let koolAidd = allConnections.first { $0.username == "Kool-Aidd" }!
+        let trist0 = allConnections.first { $0.username == "Trist0" }!
+        let akaWild = allConnections.first { $0.username == "AkaWild" }!
+        let jay = allConnections.first { $0.username == "Jay" }!
+
         let poconosPins: [MemoryPin] = [
             MemoryPin(
                 coordinate: CLLocationCoordinate2D(latitude: 41.0534, longitude: -75.5155),
@@ -101,7 +188,13 @@ final class LaterViewModel {
                     PlaylistTrack(title: "Levitating", artist: "Dua Lipa", albumArtURL: "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=100", duration: "3:23")
                 ],
                 externalURL: "https://open.spotify.com"
-            )
+            ),
+            comments: [
+                Comment(username: "Kool-Aidd", text: "Best trip ever no cap 🔥"),
+                Comment(username: "Trist0", text: "We gotta do this again next summer"),
+                Comment(username: "AkaWild", text: "The bonfire was legendary")
+            ],
+            connections: [koolAidd, trist0, akaWild]
         )
 
         let nycPins: [MemoryPin] = [
@@ -152,7 +245,8 @@ final class LaterViewModel {
                     PlaylistTrack(title: "New York, New York", artist: "Frank Sinatra", duration: "3:26")
                 ],
                 externalURL: "https://music.apple.com"
-            )
+            ),
+            connections: [jay]
         )
 
         let tokyoPins: [MemoryPin] = [
@@ -189,25 +283,7 @@ final class LaterViewModel {
         )
 
         memories = [poconosMemory, nycMemory, tokyoMemory]
-
-        globalPins = memories.flatMap { memory in
-            memory.pins.map { pin in
-                MemoryPin(
-                    id: pin.id,
-                    coordinate: pin.coordinate,
-                    title: memory.title,
-                    date: pin.date,
-                    imageURL: pin.imageURL,
-                    intensity: pin.intensity
-                )
-            }
-        }
-    }
-
-    func memory(for pin: MemoryPin) -> Memory? {
-        memories.first { memory in
-            memory.pins.contains { $0.id == pin.id }
-        }
+        rebuildGlobalPins()
     }
 
     private func dateFrom(_ string: String) -> Date {

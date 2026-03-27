@@ -1,6 +1,8 @@
 import SwiftUI
+import CoreLocation
 
 struct ProfileView: View {
+    let viewModel: LaterViewModel
     @State private var selectedSegment: ProfileSegment = .timeline
 
     enum ProfileSegment: String, CaseIterable {
@@ -83,15 +85,19 @@ struct ProfileView: View {
         .padding(.top, 8)
     }
 
+    private var cityCount: Int {
+        Set(viewModel.memories.map { "\(Int($0.centerCoordinate.latitude)),\(Int($0.centerCoordinate.longitude))" }).count
+    }
+
     private var statsRow: some View {
         HStack(spacing: 0) {
-            statItem(value: "47", label: "Memories")
+            statItem(value: "\(viewModel.memories.count)", label: "Memories")
             Divider().frame(height: 32)
             statItem(value: "12", label: "Capsules")
             Divider().frame(height: 32)
-            statItem(value: "8", label: "Connections")
+            statItem(value: "\(viewModel.allConnections.count)", label: "Connections")
             Divider().frame(height: 32)
-            statItem(value: "3", label: "Cities")
+            statItem(value: "\(cityCount)", label: "Cities")
         }
         .padding(.vertical, 12)
         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
@@ -110,41 +116,45 @@ struct ProfileView: View {
 
     private var timelineContent: some View {
         VStack(spacing: 12) {
-            ForEach(0..<5) { i in
-                let entries: [(String, String, String)] = [
-                    ("Aug 15", "Poconos Trip 2025", "4 friends, 12 photos"),
-                    ("Jul 4", "NYC Fourth of July", "2 friends, 6 photos"),
-                    ("Mar 20", "Tokyo Spring 2025", "Solo trip, 8 photos"),
-                    ("Jan 1", "New Year's Eve", "3 friends, 15 photos"),
-                    ("Dec 25", "Christmas at Home", "Family, 10 photos")
-                ]
-                let entry = entries[i]
-
-                HStack(spacing: 12) {
-                    Text(entry.0)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 50, alignment: .trailing)
-
-                    Circle()
-                        .fill(.blue)
-                        .frame(width: 10, height: 10)
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(entry.1)
-                            .font(.subheadline.weight(.semibold))
-                        Text(entry.2)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Spacer()
-
-                    Image(systemName: "chevron.right")
-                        .font(.caption)
+            if viewModel.memories.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 32))
                         .foregroundStyle(.tertiary)
+                    Text("No memories yet")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                 }
-                .padding(.horizontal, 16)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 40)
+            } else {
+                ForEach(viewModel.memories) { memory in
+                    HStack(spacing: 12) {
+                        Text(shortDate(memory.date))
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 50, alignment: .trailing)
+
+                        Circle()
+                            .fill(.blue)
+                            .frame(width: 10, height: 10)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(memory.title)
+                                .font(.subheadline.weight(.semibold))
+                            Text("\(memory.connections.count) friends, \(memory.photoURLs.count) photos")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer()
+
+                        Image(systemName: "chevron.right")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.horizontal, 16)
+                }
             }
         }
         .padding(.bottom, 32)
@@ -152,40 +162,40 @@ struct ProfileView: View {
 
     private var connectionsContent: some View {
         VStack(spacing: 12) {
-            ForEach(0..<4) { i in
-                let people: [(String, String, String)] = [
-                    ("K", "Kool-Aidd", "3 shared memories"),
-                    ("T", "Trist0", "2 shared memories"),
-                    ("A", "AkaWild", "1 shared memory"),
-                    ("J", "Jay", "1 shared memory")
-                ]
-                let person = people[i]
+            if viewModel.allConnections.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "person.2.slash")
+                        .font(.system(size: 32))
+                        .foregroundStyle(.tertiary)
+                    Text("No connections yet")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 40)
+            } else {
+                ForEach(viewModel.allConnections) { connection in
+                    let sharedCount = viewModel.memories.filter { $0.connections.contains(where: { $0.id == connection.id }) }.count
 
-                HStack(spacing: 12) {
-                    Circle()
-                        .fill(Color(.tertiarySystemFill))
-                        .frame(width: 40, height: 40)
-                        .overlay {
-                            Text(person.0)
-                                .font(.headline)
+                    HStack(spacing: 12) {
+                        ConnectionAvatarView(connection: connection, size: 40)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(connection.displayName)
+                                .font(.subheadline.weight(.semibold))
+                            Text("\(sharedCount) shared memor\(sharedCount == 1 ? "y" : "ies")")
+                                .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
 
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(person.1)
-                            .font(.subheadline.weight(.semibold))
-                        Text(person.2)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        Spacer()
+
+                        Image(systemName: "message.fill")
+                            .font(.body)
+                            .foregroundStyle(.blue)
                     }
-
-                    Spacer()
-
-                    Image(systemName: "message.fill")
-                        .font(.body)
-                        .foregroundStyle(.blue)
+                    .padding(.horizontal, 16)
                 }
-                .padding(.horizontal, 16)
             }
         }
         .padding(.bottom, 32)
@@ -215,5 +225,11 @@ struct ProfileView: View {
             .padding(.top, 8)
         }
         .padding(.vertical, 24)
+    }
+
+    private func shortDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        return formatter.string(from: date)
     }
 }

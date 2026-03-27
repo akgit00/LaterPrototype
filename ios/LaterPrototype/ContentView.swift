@@ -15,7 +15,7 @@ struct ContentView: View {
             }
 
             Tab("Profile", systemImage: "person.crop.circle", value: 2) {
-                ProfileView()
+                ProfileView(viewModel: viewModel)
             }
         }
         .tint(.white)
