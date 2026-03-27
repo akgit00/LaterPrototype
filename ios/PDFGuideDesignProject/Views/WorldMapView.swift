@@ -10,7 +10,6 @@ struct WorldMapView: View {
         pitch: 0
     ))
     @State private var selectedMemory: Memory?
-    @State private var showMemoryRoom: Bool = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -19,7 +18,6 @@ struct WorldMapView: View {
                     Annotation(memory.title, coordinate: memory.centerCoordinate) {
                         Button {
                             selectedMemory = memory
-                            showMemoryRoom = true
                         } label: {
                             MemoryPinView(memory: memory)
                         }
@@ -44,10 +42,8 @@ struct WorldMapView: View {
                 )
             }
         }
-        .fullScreenCover(isPresented: $showMemoryRoom) {
-            if let memory = selectedMemory {
-                MemoryRoomView(memory: memory)
-            }
+        .fullScreenCover(item: $selectedMemory) { memory in
+            MemoryRoomView(memory: memory)
         }
     }
 }
