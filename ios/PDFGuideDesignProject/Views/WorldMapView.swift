@@ -9,7 +9,8 @@ struct WorldMapView: View {
         heading: 0,
         pitch: 0
     ))
-    @State private var selectedMemory: Memory?
+    @State private var selectedMemoryID: UUID?
+    @State private var showCreateMemory: Bool = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -17,7 +18,7 @@ struct WorldMapView: View {
                 ForEach(viewModel.memories) { memory in
                     Annotation(memory.title, coordinate: memory.centerCoordinate) {
                         Button {
-                            selectedMemory = memory
+                            selectedMemoryID = memory.id
                         } label: {
                             MemoryPinView(memory: memory)
                         }
@@ -28,10 +29,26 @@ struct WorldMapView: View {
             .ignoresSafeArea()
 
             VStack(spacing: 0) {
+                HStack {
+                    Spacer()
+                    Button {
+                        showCreateMemory = true
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.title3.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 44, height: 44)
+                            .background(.ultraThinMaterial, in: Circle())
+                            .shadow(color: .black.opacity(0.3), radius: 8, x: 0, y: 4)
+                    }
+                    .padding(.trailing, 16)
+                    .padding(.bottom, 8)
+                }
+
                 WaveformTimelineView(
                     memories: viewModel.memories,
                     onMemorySelected: { memory in
-                        selectedMemory = memory
+                        selectedMemoryID = memory.id
                         withAnimation(.spring(duration: 0.6)) {
                             position = .region(MKCoordinateRegion(
                                 center: memory.centerCoordinate,
@@ -42,10 +59,18 @@ struct WorldMapView: View {
                 )
             }
         }
-        .fullScreenCover(item: $selectedMemory) { memory in
-            MemoryRoomView(memory: memory)
+        .fullScreenCover(item: $selectedMemoryID) { memoryID in
+            MemoryRoomView(memoryID: memoryID, viewModel: viewModel)
+        }
+        .sheet(isPresented: $showCreateMemory) {
+            CreateMemoryView(viewModel: viewModel)
+                .presentationDetents([.large])
         }
     }
+}
+
+extension UUID: @retroactive Identifiable {
+    public var id: UUID { self }
 }
 
 struct MemoryPinView: View {

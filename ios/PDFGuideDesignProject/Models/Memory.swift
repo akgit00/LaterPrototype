@@ -1,7 +1,7 @@
 import Foundation
 import CoreLocation
 
-nonisolated struct MemoryPin: Identifiable, Sendable {
+nonisolated struct MemoryPin: Identifiable, Sendable, Hashable {
     let id: UUID
     let coordinate: CLLocationCoordinate2D
     let title: String
@@ -16,6 +16,14 @@ nonisolated struct MemoryPin: Identifiable, Sendable {
         self.date = date
         self.imageURL = imageURL
         self.intensity = intensity
+    }
+
+    nonisolated static func == (lhs: MemoryPin, rhs: MemoryPin) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    nonisolated func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
     }
 }
 
@@ -90,26 +98,68 @@ nonisolated struct VideoAttachment: Identifiable, Sendable {
     }
 }
 
+nonisolated struct Comment: Identifiable, Sendable {
+    let id: UUID
+    let username: String
+    let text: String
+    let date: Date
+
+    init(id: UUID = UUID(), username: String, text: String, date: Date = Date()) {
+        self.id = id
+        self.username = username
+        self.text = text
+        self.date = date
+    }
+}
+
+nonisolated struct Connection: Identifiable, Sendable, Hashable {
+    let id: UUID
+    let username: String
+    let displayName: String
+    let avatarColor: ConnectionColor
+
+    init(id: UUID = UUID(), username: String, displayName: String = "", avatarColor: ConnectionColor = .blue) {
+        self.id = id
+        self.username = username
+        self.displayName = displayName.isEmpty ? username : displayName
+        self.avatarColor = avatarColor
+    }
+
+    nonisolated static func == (lhs: Connection, rhs: Connection) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    nonisolated func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+}
+
+nonisolated enum ConnectionColor: String, CaseIterable, Sendable {
+    case blue, purple, pink, orange, green, teal
+}
+
 nonisolated struct Memory: Identifiable, Sendable {
     let id: UUID
-    let title: String
-    let subtitle: String
-    let date: Date
-    let creators: [String]
-    let centerCoordinate: CLLocationCoordinate2D
-    let spanDelta: Double
-    let pins: [MemoryPin]
-    let photoURLs: [String]
-    let videos: [VideoAttachment]
-    let chatLog: [ChatMessage]
-    let music: MusicAttachment?
-    let playlist: PlaylistAttachment?
+    var title: String
+    var subtitle: String
+    var date: Date
+    var creators: [String]
+    var centerCoordinate: CLLocationCoordinate2D
+    var spanDelta: Double
+    var pins: [MemoryPin]
+    var photoURLs: [String]
+    var videos: [VideoAttachment]
+    var chatLog: [ChatMessage]
+    var music: MusicAttachment?
+    var playlist: PlaylistAttachment?
+    var comments: [Comment]
+    var connections: [Connection]
 
     init(
         id: UUID = UUID(),
         title: String,
         subtitle: String = "",
-        date: Date,
+        date: Date = Date(),
         creators: [String] = [],
         centerCoordinate: CLLocationCoordinate2D,
         spanDelta: Double = 0.5,
@@ -118,7 +168,9 @@ nonisolated struct Memory: Identifiable, Sendable {
         videos: [VideoAttachment] = [],
         chatLog: [ChatMessage] = [],
         music: MusicAttachment? = nil,
-        playlist: PlaylistAttachment? = nil
+        playlist: PlaylistAttachment? = nil,
+        comments: [Comment] = [],
+        connections: [Connection] = []
     ) {
         self.id = id
         self.title = title
@@ -133,5 +185,7 @@ nonisolated struct Memory: Identifiable, Sendable {
         self.chatLog = chatLog
         self.music = music
         self.playlist = playlist
+        self.comments = comments
+        self.connections = connections
     }
 }

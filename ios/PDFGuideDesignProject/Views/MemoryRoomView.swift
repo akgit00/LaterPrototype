@@ -3,7 +3,8 @@ import MapKit
 import PhotosUI
 
 struct MemoryRoomView: View {
-    let memory: Memory
+    let memoryID: UUID
+    let viewModel: LaterViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var mapPosition: MapCameraPosition
     @State private var selectedPhotoIndex: Int?
@@ -12,13 +13,22 @@ struct MemoryRoomView: View {
     @State private var showMediaSheet: Bool = true
     @State private var showAddPhotosPicker: Bool = false
     @State private var showAddPlaylistSheet: Bool = false
+    @State private var showAddPeopleSheet: Bool = false
     @State private var selectedPhotosItems: [PhotosPickerItem] = []
 
-    init(memory: Memory) {
-        self.memory = memory
+    private var memory: Memory {
+        viewModel.memoryByID(memoryID) ?? Memory(title: "", centerCoordinate: CLLocationCoordinate2D())
+    }
+
+    init(memoryID: UUID, viewModel: LaterViewModel) {
+        self.memoryID = memoryID
+        self.viewModel = viewModel
+        let mem = viewModel.memoryByID(memoryID)
+        let center = mem?.centerCoordinate ?? CLLocationCoordinate2D()
+        let span = mem?.spanDelta ?? 0.5
         _mapPosition = State(initialValue: .region(MKCoordinateRegion(
-            center: memory.centerCoordinate,
-            span: MKCoordinateSpan(latitudeDelta: memory.spanDelta, longitudeDelta: memory.spanDelta)
+            center: center,
+            span: MKCoordinateSpan(latitudeDelta: span, longitudeDelta: span)
         )))
     }
 
@@ -51,7 +61,8 @@ struct MemoryRoomView: View {
         }
         .sheet(isPresented: $showMediaSheet) {
             MemoryMediaSheet(
-                memory: memory,
+                memoryID: memoryID,
+                viewModel: viewModel,
                 onPhotoTap: { index in
                     selectedPhotoIndex = index
                     showPhotoViewer = true
@@ -61,6 +72,9 @@ struct MemoryRoomView: View {
                 },
                 onAddPlaylist: {
                     showAddPlaylistSheet = true
+                },
+                onAddPeople: {
+                    showAddPeopleSheet = true
                 }
             )
             .presentationDetents([.fraction(0.15), .fraction(0.45), .large], selection: $selectedDetent)
@@ -77,8 +91,12 @@ struct MemoryRoomView: View {
         }
         .photosPicker(isPresented: $showAddPhotosPicker, selection: $selectedPhotosItems, maxSelectionCount: 10, matching: .any(of: [.images, .videos]))
         .sheet(isPresented: $showAddPlaylistSheet) {
-            AddPlaylistSheet()
+            AddPlaylistSheet(memoryID: memoryID, viewModel: viewModel)
                 .presentationDetents([.medium])
+        }
+        .sheet(isPresented: $showAddPeopleSheet) {
+            AddPeopleSheet(memoryID: memoryID, viewModel: viewModel)
+                .presentationDetents([.medium, .large])
         }
     }
 
@@ -120,24 +138,47 @@ struct MemoryRoomView: View {
                     .foregroundStyle(.white.opacity(0.8))
                     .shadow(color: .black.opacity(0.4), radius: 2, x: 0, y: 1)
             }
+
+            if !memory.connections.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: -6) {
+                        ForEach(memory.connections) { connection in
+                            ConnectionAvatarView(connection: connection, size: 28)
+                                .overlay {
+                                    Circle().stroke(.white, lineWidth: 2)
+                                }
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                }
+                .contentMargins(.horizontal, 0)
+                .padding(.top, 2)
+            }
         }
         .padding(.top, 4)
     }
 }
 
 struct MemoryMediaSheet: View {
-    let memory: Memory
+    let memoryID: UUID
+    let viewModel: LaterViewModel
     let onPhotoTap: (Int) -> Void
     let onAddPhotos: () -> Void
     let onAddPlaylist: () -> Void
+    let onAddPeople: () -> Void
 
     @State private var selectedSection: MediaSection = .photos
+
+    private var memory: Memory {
+        viewModel.memoryByID(memoryID) ?? Memory(title: "", centerCoordinate: CLLocationCoordinate2D())
+    }
 
     enum MediaSection: String, CaseIterable {
         case photos = "Photos"
         case videos = "Videos"
         case playlist = "Playlist"
-        case chat = "Chat Log"
+        case comments = "Comments"
+        case people = "People"
     }
 
     var body: some View {
@@ -165,6 +206,18 @@ struct MemoryMediaSheet: View {
                                         .font(.caption2)
                                     Text(section.rawValue)
                                         .font(.subheadline.weight(.medium))
+                                    if let count = badgeCount(for: section), count > 0 {
+                                        Text("\(count)")
+                                            .font(.caption2.weight(.bold))
+                                            .padding(.horizontal, 5)
+                                            .padding(.vertical, 1)
+                                            .background(
+                                                selectedSection == section
+                                                    ? Color(.systemBackground).opacity(0.3)
+                                                    : Color(.tertiarySystemFill),
+                                                in: Capsule()
+                                            )
+                                    }
                                 }
                                 .padding(.horizontal, 14)
                                 .padding(.vertical, 8)
@@ -189,8 +242,10 @@ struct MemoryMediaSheet: View {
                     videosSection
                 case .playlist:
                     playlistSection
-                case .chat:
-                    chatSection
+                case .comments:
+                    commentsSection
+                case .people:
+                    peopleSection
                 }
             }
             .padding(.top, 8)
@@ -203,7 +258,18 @@ struct MemoryMediaSheet: View {
         case .photos: return "photo.fill"
         case .videos: return "video.fill"
         case .playlist: return "music.note.list"
-        case .chat: return "bubble.left.and.bubble.right.fill"
+        case .comments: return "bubble.left.fill"
+        case .people: return "person.2.fill"
+        }
+    }
+
+    private func badgeCount(for section: MediaSection) -> Int? {
+        switch section {
+        case .photos: return memory.photoURLs.count
+        case .videos: return memory.videos.count
+        case .playlist: return memory.playlist != nil ? 1 : nil
+        case .comments: return memory.comments.count
+        case .people: return memory.connections.count
         }
     }
 
@@ -494,28 +560,242 @@ struct MemoryMediaSheet: View {
         }
     }
 
-    private var chatSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("\(memory.chatLog.count) Messages")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 20)
+    private var commentsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("\(memory.comments.count) Comments")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 20)
 
-            if memory.chatLog.isEmpty {
+            if memory.comments.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "bubble.left.and.bubble.right")
                         .font(.system(size: 32))
                         .foregroundStyle(.tertiary)
-                    Text("No chat messages")
+                    Text("No comments yet")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                    Text("Be the first to drop a comment on this memory")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 32)
             } else {
-                ForEach(memory.chatLog) { message in
-                    ChatBubbleView(message: message)
+                ForEach(memory.comments) { comment in
+                    CommentBubbleView(comment: comment)
                         .padding(.horizontal, 20)
+                }
+            }
+
+            CommentInputView(memoryID: memoryID, viewModel: viewModel)
+                .padding(.horizontal, 20)
+                .padding(.top, 4)
+        }
+    }
+
+    private var peopleSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("\(memory.connections.count) People")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    onAddPeople()
+                } label: {
+                    Label("Add", systemImage: "person.badge.plus")
+                        .font(.subheadline.weight(.medium))
+                }
+            }
+            .padding(.horizontal, 20)
+
+            if memory.connections.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "person.2.slash")
+                        .font(.system(size: 32))
+                        .foregroundStyle(.tertiary)
+                    Text("No people added")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Button {
+                        onAddPeople()
+                    } label: {
+                        Label("Add People", systemImage: "person.badge.plus")
+                            .font(.subheadline.weight(.medium))
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 32)
+            } else {
+                ForEach(memory.connections) { connection in
+                    HStack(spacing: 12) {
+                        ConnectionAvatarView(connection: connection, size: 44)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(connection.displayName)
+                                .font(.subheadline.weight(.semibold))
+                            Text("@\(connection.username)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer()
+
+                        Button {
+                            viewModel.removeConnection(from: memoryID, connection: connection)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.title3)
+                                .symbolRenderingMode(.hierarchical)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 4)
+                }
+            }
+        }
+    }
+}
+
+struct CommentBubbleView: View {
+    let comment: Comment
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(Color(.tertiarySystemFill))
+                    .frame(width: 28, height: 28)
+                    .overlay {
+                        Text(String(comment.username.prefix(1)).uppercased())
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.secondary)
+                    }
+
+                Text(comment.username)
+                    .font(.subheadline.weight(.semibold))
+
+                Spacer()
+
+                Text(comment.date, style: .relative)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+
+            Text(comment.text)
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+        }
+        .padding(12)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+struct CommentInputView: View {
+    let memoryID: UUID
+    let viewModel: LaterViewModel
+    @State private var commentText: String = ""
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Circle()
+                .fill(
+                    LinearGradient(colors: [.blue, .purple], startPoint: .topLeading, endPoint: .bottomTrailing)
+                )
+                .frame(width: 32, height: 32)
+                .overlay {
+                    Text("S")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+
+            HStack(spacing: 8) {
+                TextField("Add a comment...", text: $commentText, axis: .vertical)
+                    .font(.subheadline)
+                    .lineLimit(1...3)
+                    .focused($isFocused)
+
+                if !commentText.isEmpty {
+                    Button {
+                        let comment = Comment(
+                            username: "Samantherr",
+                            text: commentText
+                        )
+                        viewModel.addComment(to: memoryID, comment: comment)
+                        commentText = ""
+                        isFocused = false
+                    } label: {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.title2)
+                            .foregroundStyle(.blue)
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color(.tertiarySystemFill), in: Capsule())
+        }
+    }
+}
+
+struct AddPeopleSheet: View {
+    let memoryID: UUID
+    let viewModel: LaterViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    private var memory: Memory {
+        viewModel.memoryByID(memoryID) ?? Memory(title: "", centerCoordinate: CLLocationCoordinate2D())
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(viewModel.allConnections) { connection in
+                    let isAdded = memory.connections.contains(where: { $0.id == connection.id })
+
+                    Button {
+                        if isAdded {
+                            viewModel.removeConnection(from: memoryID, connection: connection)
+                        } else {
+                            viewModel.addConnection(to: memoryID, connection: connection)
+                        }
+                    } label: {
+                        HStack(spacing: 12) {
+                            ConnectionAvatarView(connection: connection, size: 40)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(connection.displayName)
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(.primary)
+                                Text("@\(connection.username)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer()
+
+                            Image(systemName: isAdded ? "checkmark.circle.fill" : "plus.circle")
+                                .font(.title3)
+                                .foregroundStyle(isAdded ? .green : .blue)
+                                .symbolEffect(.bounce, value: isAdded)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Add People")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                        .fontWeight(.semibold)
                 }
             }
         }
@@ -566,8 +846,11 @@ struct VideoThumbnailCard: View {
 }
 
 struct AddPlaylistSheet: View {
+    let memoryID: UUID
+    let viewModel: LaterViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var playlistURL: String = ""
+    @State private var playlistName: String = ""
     @State private var selectedSource: PlaylistSource = .spotify
 
     var body: some View {
@@ -578,6 +861,15 @@ struct AddPlaylistSheet: View {
                     Text("Apple Music").tag(PlaylistSource.appleMusic)
                 }
                 .pickerStyle(.segmented)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Playlist Name")
+                        .font(.subheadline.weight(.medium))
+
+                    TextField("My Playlist", text: $playlistName)
+                        .padding(12)
+                        .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 10))
+                }
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Playlist Link")
@@ -597,24 +889,15 @@ struct AddPlaylistSheet: View {
                     .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 10))
                 }
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Or search for a playlist")
-                        .font(.subheadline.weight(.medium))
-
-                    HStack(spacing: 10) {
-                        Image(systemName: "magnifyingglass")
-                            .foregroundStyle(.secondary)
-                        Text("Search \(selectedSource.rawValue)...")
-                            .foregroundStyle(.tertiary)
-                        Spacer()
-                    }
-                    .padding(12)
-                    .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 10))
-                }
-
                 Spacer()
 
                 Button {
+                    let playlist = PlaylistAttachment(
+                        name: playlistName.isEmpty ? "My Playlist" : playlistName,
+                        source: selectedSource,
+                        externalURL: playlistURL.isEmpty ? nil : playlistURL
+                    )
+                    viewModel.setPlaylist(for: memoryID, playlist: playlist)
                     dismiss()
                 } label: {
                     Text("Link Playlist")
@@ -627,8 +910,8 @@ struct AddPlaylistSheet: View {
                         )
                         .foregroundStyle(.white)
                 }
-                .disabled(playlistURL.isEmpty)
-                .opacity(playlistURL.isEmpty ? 0.5 : 1)
+                .disabled(playlistURL.isEmpty && playlistName.isEmpty)
+                .opacity((playlistURL.isEmpty && playlistName.isEmpty) ? 0.5 : 1)
             }
             .padding(20)
             .navigationTitle("Link Playlist")
