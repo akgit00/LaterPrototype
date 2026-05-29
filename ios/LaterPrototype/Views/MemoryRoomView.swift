@@ -13,11 +13,8 @@ struct MemoryRoomView: View {
     @State private var showPhotoViewer: Bool = false
     @State private var selectedDetent: PresentationDetent = .fraction(0.45)
     @State private var showMediaSheet: Bool = true
-    @State private var showAddPhotosPicker: Bool = false
     @State private var showAddPlaylistSheet: Bool = false
     @State private var showAddPeopleSheet: Bool = false
-    @State private var selectedPhotosItems: [PhotosPickerItem] = []
-    @State private var isImportingMedia: Bool = false
     @State private var playingVideoURL: URL?
     @State private var showDeleteMemoryConfirm: Bool = false
 
@@ -72,9 +69,6 @@ struct MemoryRoomView: View {
                     selectedPhotoIndex = index
                     showPhotoViewer = true
                 },
-                onAddPhotos: {
-                    showAddPhotosPicker = true
-                },
                 onAddPlaylist: {
                     showAddPlaylistSheet = true
                 },
@@ -85,8 +79,7 @@ struct MemoryRoomView: View {
                     if let urlString = video.videoURL, let url = URL(string: urlString) {
                         playingVideoURL = url
                     }
-                },
-                isImporting: isImportingMedia
+                }
             )
             .presentationDetents([.fraction(0.15), .fraction(0.45), .large], selection: $selectedDetent)
             .presentationDragIndicator(.visible)
@@ -99,13 +92,6 @@ struct MemoryRoomView: View {
             if let index = selectedPhotoIndex {
                 PhotoViewerSheet(photoURLs: memory.photoURLs, initialIndex: index)
             }
-        }
-        .photosPicker(isPresented: $showAddPhotosPicker, selection: $selectedPhotosItems, maxSelectionCount: 10, matching: .any(of: [.images, .videos]))
-        .onChange(of: selectedPhotosItems) { _, items in
-            guard !items.isEmpty else { return }
-            let captured = items
-            selectedPhotosItems = []
-            Task { await importPickedItems(captured) }
         }
         .fullScreenCover(item: $playingVideoURL) { url in
             VideoPlayerView(url: url)
@@ -130,32 +116,6 @@ struct MemoryRoomView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This will permanently remove all photos, videos, and details for \"\(memory.title)\".")
-        }
-    }
-
-    private func importPickedItems(_ items: [PhotosPickerItem]) async {
-        isImportingMedia = true
-        defer { isImportingMedia = false }
-
-        for item in items {
-            let isVideo = item.supportedContentTypes.contains { $0.conforms(to: .movie) }
-            guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
-
-            if isVideo {
-                guard let urlString = MediaStore.saveVideo(data), let url = URL(string: urlString) else { continue }
-                let thumbnail = await MediaStore.generateThumbnail(for: url)
-                let duration = await MediaStore.durationString(for: url)
-                let video = VideoAttachment(
-                    thumbnailURL: thumbnail ?? "",
-                    title: "Video",
-                    duration: duration,
-                    videoURL: urlString
-                )
-                viewModel.addVideo(to: memoryID, video: video)
-            } else {
-                guard let urlString = MediaStore.saveImage(data) else { continue }
-                viewModel.addPhotoURL(to: memoryID, url: urlString)
-            }
         }
     }
 
@@ -231,13 +191,14 @@ struct MemoryMediaSheet: View {
     let memoryID: UUID
     let viewModel: LaterViewModel
     let onPhotoTap: (Int) -> Void
-    let onAddPhotos: () -> Void
     let onAddPlaylist: () -> Void
     let onAddPeople: () -> Void
     let onVideoTap: (VideoAttachment) -> Void
-    let isImporting: Bool
 
     @State private var selectedSection: MediaSection = .photos
+    @State private var showAddPhotosPicker: Bool = false
+    @State private var selectedPhotosItems: [PhotosPickerItem] = []
+    @State private var isImporting: Bool = false
 
     private var memory: Memory {
         viewModel.memoryByID(memoryID) ?? Memory(title: "", centerCoordinate: CLLocationCoordinate2D())
@@ -321,6 +282,44 @@ struct MemoryMediaSheet: View {
             .padding(.top, 8)
             .padding(.bottom, 32)
         }
+        .photosPicker(
+            isPresented: $showAddPhotosPicker,
+            selection: $selectedPhotosItems,
+            maxSelectionCount: 10,
+            matching: .any(of: [.images, .videos])
+        )
+        .onChange(of: selectedPhotosItems) { _, items in
+            guard !items.isEmpty else { return }
+            let captured = items
+            selectedPhotosItems = []
+            Task { await importPickedItems(captured) }
+        }
+    }
+
+    private func importPickedItems(_ items: [PhotosPickerItem]) async {
+        isImporting = true
+        defer { isImporting = false }
+
+        for item in items {
+            let isVideo = item.supportedContentTypes.contains { $0.conforms(to: .movie) }
+            guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
+
+            if isVideo {
+                guard let urlString = MediaStore.saveVideo(data), let url = URL(string: urlString) else { continue }
+                let thumbnail = await MediaStore.generateThumbnail(for: url)
+                let duration = await MediaStore.durationString(for: url)
+                let video = VideoAttachment(
+                    thumbnailURL: thumbnail ?? "",
+                    title: "Video",
+                    duration: duration,
+                    videoURL: urlString
+                )
+                viewModel.addVideo(to: memoryID, video: video)
+            } else {
+                guard let urlString = MediaStore.saveImage(data) else { continue }
+                viewModel.addPhotoURL(to: memoryID, url: urlString)
+            }
+        }
     }
 
     private func iconFor(_ section: MediaSection) -> String {
@@ -355,7 +354,7 @@ struct MemoryMediaSheet: View {
                 }
                 Spacer()
                 Button {
-                    onAddPhotos()
+                    showAddPhotosPicker = true
                 } label: {
                     Label("Add", systemImage: "plus")
                         .font(.subheadline.weight(.medium))
@@ -371,7 +370,7 @@ struct MemoryMediaSheet: View {
 
             LazyVGrid(columns: columns, spacing: 4) {
                 Button {
-                    onAddPhotos()
+                    showAddPhotosPicker = true
                 } label: {
                     RoundedRectangle(cornerRadius: 8)
                         .fill(Color(.tertiarySystemFill))
@@ -421,7 +420,7 @@ struct MemoryMediaSheet: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
-                    onAddPhotos()
+                    showAddPhotosPicker = true
                 } label: {
                     Label("Add", systemImage: "plus")
                         .font(.subheadline.weight(.medium))
@@ -438,7 +437,7 @@ struct MemoryMediaSheet: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     Button {
-                        onAddPhotos()
+                        showAddPhotosPicker = true
                     } label: {
                         Text("Add Video")
                             .font(.subheadline.weight(.medium))
@@ -451,7 +450,7 @@ struct MemoryMediaSheet: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 12) {
                         Button {
-                            onAddPhotos()
+                            showAddPhotosPicker = true
                         } label: {
                             RoundedRectangle(cornerRadius: 12)
                                 .fill(Color(.tertiarySystemFill))
