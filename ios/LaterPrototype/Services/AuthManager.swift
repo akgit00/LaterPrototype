@@ -10,9 +10,9 @@ class AuthManager {
     var showError = false
     var errorMessage = ""
 
-    private let authURL = Config.EXPO_PUBLIC_LATER_AUTH_URL
-    private let appKey = Config.EXPO_PUBLIC_LATER_APP_KEY
-    private let projectID = Config.EXPO_PUBLIC_PROJECT_ID
+    private let authURL = AuthConfig.authURL
+    private let appKey = AuthConfig.appKey
+    private let projectID = AuthConfig.projectID
     private var codeVerifier: String?
     private var webAuthSession: ASWebAuthenticationSession?
 
