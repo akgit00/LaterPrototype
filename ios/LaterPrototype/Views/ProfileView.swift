@@ -3,7 +3,38 @@ import CoreLocation
 
 struct ProfileView: View {
     let viewModel: LaterViewModel
+    @Environment(AuthManager.self) private var auth
+    @Environment(ProfileManager.self) private var profile
     @State private var selectedSegment: ProfileSegment = .timeline
+    @State private var showSignOutConfirm = false
+    @State private var showEditProfile = false
+
+    private static let defaultBio = "Collecting moments across time & space"
+
+    /// The account's default name, derived from auth, used when no override is set.
+    private var accountName: String {
+        if let name = auth.user?.name, !name.isEmpty { return name }
+        if let email = auth.user?.email, !email.isEmpty {
+            return String(email.prefix(while: { $0 != "@" }))
+        }
+        return "You"
+    }
+
+    private var displayName: String {
+        profile.displayNameOverride ?? accountName
+    }
+
+    private var bio: String {
+        profile.bioOverride ?? Self.defaultBio
+    }
+
+    private var avatarURL: String? {
+        profile.avatarLocalURL ?? auth.user?.picture
+    }
+
+    private var initial: String {
+        String(displayName.prefix(1)).uppercased()
+    }
 
     enum ProfileSegment: String, CaseIterable {
         case timeline = "Timeline"
@@ -42,6 +73,40 @@ struct ProfileView: View {
                 }
             }
             .navigationTitle("Profile")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button {
+                            showEditProfile = true
+                        } label: {
+                            Label("Edit Profile", systemImage: "pencil")
+                        }
+                        Button(role: .destructive) {
+                            showSignOutConfirm = true
+                        } label: {
+                            Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                }
+            }
+            .confirmationDialog("Sign out of Later?", isPresented: $showSignOutConfirm, titleVisibility: .visible) {
+                Button("Sign out", role: .destructive) {
+                    profile.clear()
+                    Task { await auth.signOut() }
+                }
+                Button("Cancel", role: .cancel) { }
+            }
+            .sheet(isPresented: $showEditProfile) {
+                EditProfileView(
+                    profile: profile,
+                    initialName: profile.displayNameOverride ?? accountName,
+                    initialBio: profile.bioOverride ?? Self.defaultBio,
+                    fallbackInitial: initial,
+                    authPicture: auth.user?.picture
+                )
+            }
         }
     }
 
@@ -58,29 +123,56 @@ struct ProfileView: View {
                     )
                     .frame(width: 88, height: 88)
 
-                Text("S")
-                    .font(.system(size: 36, weight: .bold))
-                    .foregroundStyle(.white)
+                if let picture = avatarURL, let url = URL(string: picture) {
+                    AsyncImage(url: url) { image in
+                        image.resizable().aspectRatio(contentMode: .fill)
+                    } placeholder: {
+                        Text(initial)
+                            .font(.system(size: 36, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                    .frame(width: 88, height: 88)
+                    .clipShape(.circle)
+                } else {
+                    Text(initial)
+                        .font(.system(size: 36, weight: .bold))
+                        .foregroundStyle(.white)
+                }
             }
 
             VStack(spacing: 4) {
-                Text("Samantherr")
+                Text(displayName)
                     .font(.title2.weight(.bold))
 
-                Text("Collecting moments across time & space")
+                Text(bio)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
 
-                HStack(spacing: 4) {
-                    Image(systemName: "mappin.and.ellipse")
-                        .font(.caption2)
-                    Text("New York, NY")
-                        .font(.caption)
+                if let email = auth.user?.email, !email.isEmpty {
+                    HStack(spacing: 4) {
+                        Image(systemName: "envelope.fill")
+                            .font(.caption2)
+                        Text(email)
+                            .font(.caption)
+                    }
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 2)
                 }
-                .foregroundStyle(.tertiary)
-                .padding(.top, 2)
             }
+
+            Button {
+                showEditProfile = true
+            } label: {
+                Label("Edit Profile", systemImage: "pencil")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 9)
+            }
+            .buttonStyle(.bordered)
+            .clipShape(.capsule)
+            .padding(.top, 6)
         }
         .padding(.top, 8)
     }
