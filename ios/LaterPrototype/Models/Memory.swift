@@ -1,7 +1,7 @@
 import Foundation
 import CoreLocation
 
-nonisolated struct MemoryPin: Identifiable, Sendable, Hashable {
+nonisolated struct MemoryPin: Identifiable, Sendable, Hashable, Codable {
     let id: UUID
     let coordinate: CLLocationCoordinate2D
     let title: String
@@ -18,6 +18,33 @@ nonisolated struct MemoryPin: Identifiable, Sendable, Hashable {
         self.intensity = intensity
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case id, latitude, longitude, title, date, imageURL, intensity
+    }
+
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        let latitude = try container.decode(Double.self, forKey: .latitude)
+        let longitude = try container.decode(Double.self, forKey: .longitude)
+        coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        title = try container.decode(String.self, forKey: .title)
+        date = try container.decode(Date.self, forKey: .date)
+        imageURL = try container.decodeIfPresent(String.self, forKey: .imageURL)
+        intensity = try container.decode(Double.self, forKey: .intensity)
+    }
+
+    nonisolated func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(coordinate.latitude, forKey: .latitude)
+        try container.encode(coordinate.longitude, forKey: .longitude)
+        try container.encode(title, forKey: .title)
+        try container.encode(date, forKey: .date)
+        try container.encodeIfPresent(imageURL, forKey: .imageURL)
+        try container.encode(intensity, forKey: .intensity)
+    }
+
     nonisolated static func == (lhs: MemoryPin, rhs: MemoryPin) -> Bool {
         lhs.id == rhs.id
     }
@@ -27,7 +54,7 @@ nonisolated struct MemoryPin: Identifiable, Sendable, Hashable {
     }
 }
 
-nonisolated struct ChatMessage: Identifiable, Sendable {
+nonisolated struct ChatMessage: Identifiable, Sendable, Codable {
     let id: UUID
     let time: String
     let username: String
@@ -41,13 +68,13 @@ nonisolated struct ChatMessage: Identifiable, Sendable {
     }
 }
 
-nonisolated struct MusicAttachment: Sendable {
+nonisolated struct MusicAttachment: Sendable, Codable {
     let songTitle: String
     let artist: String
     let albumArtURL: String?
 }
 
-nonisolated struct PlaylistTrack: Identifiable, Sendable {
+nonisolated struct PlaylistTrack: Identifiable, Sendable, Codable {
     let id: UUID
     let title: String
     let artist: String
@@ -63,7 +90,7 @@ nonisolated struct PlaylistTrack: Identifiable, Sendable {
     }
 }
 
-nonisolated struct PlaylistAttachment: Sendable {
+nonisolated struct PlaylistAttachment: Sendable, Codable {
     let name: String
     let source: PlaylistSource
     let coverURL: String?
@@ -79,12 +106,12 @@ nonisolated struct PlaylistAttachment: Sendable {
     }
 }
 
-nonisolated enum PlaylistSource: String, Sendable {
+nonisolated enum PlaylistSource: String, Sendable, Codable {
     case spotify = "Spotify"
     case appleMusic = "Apple Music"
 }
 
-nonisolated struct VideoAttachment: Identifiable, Sendable {
+nonisolated struct VideoAttachment: Identifiable, Sendable, Codable {
     let id: UUID
     let thumbnailURL: String
     let title: String
@@ -101,7 +128,7 @@ nonisolated struct VideoAttachment: Identifiable, Sendable {
     }
 }
 
-nonisolated struct Comment: Identifiable, Sendable {
+nonisolated struct Comment: Identifiable, Sendable, Codable {
     let id: UUID
     let username: String
     let text: String
@@ -115,7 +142,7 @@ nonisolated struct Comment: Identifiable, Sendable {
     }
 }
 
-nonisolated struct Connection: Identifiable, Sendable, Hashable {
+nonisolated struct Connection: Identifiable, Sendable, Hashable, Codable {
     let id: UUID
     let username: String
     let displayName: String
@@ -137,11 +164,11 @@ nonisolated struct Connection: Identifiable, Sendable, Hashable {
     }
 }
 
-nonisolated enum ConnectionColor: String, CaseIterable, Sendable {
+nonisolated enum ConnectionColor: String, CaseIterable, Sendable, Codable {
     case blue, purple, pink, orange, green, teal
 }
 
-nonisolated struct Memory: Identifiable, Sendable {
+nonisolated struct Memory: Identifiable, Sendable, Codable {
     let id: UUID
     var title: String
     var subtitle: String
@@ -190,5 +217,52 @@ nonisolated struct Memory: Identifiable, Sendable {
         self.playlist = playlist
         self.comments = comments
         self.connections = connections
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, subtitle, date, creators
+        case centerLatitude, centerLongitude, spanDelta
+        case pins, photoURLs, videos, chatLog, music, playlist, comments, connections
+    }
+
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        subtitle = try container.decode(String.self, forKey: .subtitle)
+        date = try container.decode(Date.self, forKey: .date)
+        creators = try container.decode([String].self, forKey: .creators)
+        let latitude = try container.decode(Double.self, forKey: .centerLatitude)
+        let longitude = try container.decode(Double.self, forKey: .centerLongitude)
+        centerCoordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        spanDelta = try container.decode(Double.self, forKey: .spanDelta)
+        pins = try container.decode([MemoryPin].self, forKey: .pins)
+        photoURLs = try container.decode([String].self, forKey: .photoURLs)
+        videos = try container.decode([VideoAttachment].self, forKey: .videos)
+        chatLog = try container.decode([ChatMessage].self, forKey: .chatLog)
+        music = try container.decodeIfPresent(MusicAttachment.self, forKey: .music)
+        playlist = try container.decodeIfPresent(PlaylistAttachment.self, forKey: .playlist)
+        comments = try container.decode([Comment].self, forKey: .comments)
+        connections = try container.decode([Connection].self, forKey: .connections)
+    }
+
+    nonisolated func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(title, forKey: .title)
+        try container.encode(subtitle, forKey: .subtitle)
+        try container.encode(date, forKey: .date)
+        try container.encode(creators, forKey: .creators)
+        try container.encode(centerCoordinate.latitude, forKey: .centerLatitude)
+        try container.encode(centerCoordinate.longitude, forKey: .centerLongitude)
+        try container.encode(spanDelta, forKey: .spanDelta)
+        try container.encode(pins, forKey: .pins)
+        try container.encode(photoURLs, forKey: .photoURLs)
+        try container.encode(videos, forKey: .videos)
+        try container.encode(chatLog, forKey: .chatLog)
+        try container.encodeIfPresent(music, forKey: .music)
+        try container.encodeIfPresent(playlist, forKey: .playlist)
+        try container.encode(comments, forKey: .comments)
+        try container.encode(connections, forKey: .connections)
     }
 }

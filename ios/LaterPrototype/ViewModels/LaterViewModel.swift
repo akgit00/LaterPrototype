@@ -21,7 +21,19 @@ final class LaterViewModel {
 
     init() {
         loadSampleConnections()
-        loadSampleData()
+        if let stored = MemoryStore.load() {
+            memories = stored
+            rebuildGlobalPins()
+        } else if !MemoryStore.hasSeeded {
+            loadSampleData()
+            MemoryStore.hasSeeded = true
+            persist()
+        }
+    }
+
+    /// Persists the current memories to disk. Call after any mutation.
+    private func persist() {
+        MemoryStore.save(memories)
     }
 
     private func loadSampleConnections() {
@@ -38,12 +50,14 @@ final class LaterViewModel {
     func addMemory(_ memory: Memory) {
         memories.insert(memory, at: 0)
         rebuildGlobalPins()
+        persist()
     }
 
     func updateMemory(_ memory: Memory) {
         guard let index = memories.firstIndex(where: { $0.id == memory.id }) else { return }
         memories[index] = memory
         rebuildGlobalPins()
+        persist()
     }
 
     func deleteMemory(_ id: UUID) {
@@ -63,6 +77,7 @@ final class LaterViewModel {
             selectedMemory = nil
         }
         rebuildGlobalPins()
+        persist()
     }
 
     func removePhotoURL(from memoryID: UUID, url: String) {
@@ -71,6 +86,7 @@ final class LaterViewModel {
         memories[index].pins.removeAll { $0.imageURL == url }
         MediaStore.deleteFile(at: url)
         rebuildGlobalPins()
+        persist()
     }
 
     func removeVideo(from memoryID: UUID, video: VideoAttachment) {
@@ -80,26 +96,31 @@ final class LaterViewModel {
             MediaStore.deleteFile(at: videoURL)
         }
         MediaStore.deleteFile(at: video.thumbnailURL)
+        persist()
     }
 
     func addComment(to memoryID: UUID, comment: Comment) {
         guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
         memories[index].comments.append(comment)
+        persist()
     }
 
     func addPhotoURL(to memoryID: UUID, url: String) {
         guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
         memories[index].photoURLs.append(url)
+        persist()
     }
 
     func addVideo(to memoryID: UUID, video: VideoAttachment) {
         guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
         memories[index].videos.append(video)
+        persist()
     }
 
     func setPlaylist(for memoryID: UUID, playlist: PlaylistAttachment) {
         guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
         memories[index].playlist = playlist
+        persist()
     }
 
     func addConnection(to memoryID: UUID, connection: Connection) {
@@ -109,6 +130,7 @@ final class LaterViewModel {
             if !memories[index].creators.contains(connection.username) {
                 memories[index].creators.append(connection.username)
             }
+            persist()
         }
     }
 
@@ -116,6 +138,7 @@ final class LaterViewModel {
         guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
         memories[index].connections.removeAll { $0.id == connection.id }
         memories[index].creators.removeAll { $0 == connection.username }
+        persist()
     }
 
     func memory(for pin: MemoryPin) -> Memory? {
