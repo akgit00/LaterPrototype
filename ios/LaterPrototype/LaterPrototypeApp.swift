@@ -2,9 +2,14 @@ import SwiftUI
 
 @main
 struct LaterPrototypeApp: App {
+    @State private var authManager = AuthManager()
+    @State private var profileManager = ProfileManager()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
+                .environment(authManager)
+                .environment(profileManager)
         }
     }
 }
