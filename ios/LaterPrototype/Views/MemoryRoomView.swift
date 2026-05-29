@@ -19,6 +19,7 @@ struct MemoryRoomView: View {
     @State private var selectedPhotosItems: [PhotosPickerItem] = []
     @State private var isImportingMedia: Bool = false
     @State private var playingVideoURL: URL?
+    @State private var showDeleteMemoryConfirm: Bool = false
 
     private var memory: Memory {
         viewModel.memoryByID(memoryID) ?? Memory(title: "", centerCoordinate: CLLocationCoordinate2D())
@@ -117,6 +118,19 @@ struct MemoryRoomView: View {
             AddPeopleSheet(memoryID: memoryID, viewModel: viewModel)
                 .presentationDetents([.medium, .large])
         }
+        .confirmationDialog(
+            "Delete this memory?",
+            isPresented: $showDeleteMemoryConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Memory", role: .destructive) {
+                viewModel.deleteMemory(memoryID)
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will permanently remove all photos, videos, and details for \"\(memory.title)\".")
+        }
     }
 
     private func importPickedItems(_ items: [PhotosPickerItem]) async {
@@ -160,9 +174,18 @@ struct MemoryRoomView: View {
 
                 Spacer()
 
-                Button {
+                Menu {
+                    Button {
+                    } label: {
+                        Label("Share", systemImage: "square.and.arrow.up")
+                    }
+                    Button(role: .destructive) {
+                        showDeleteMemoryConfirm = true
+                    } label: {
+                        Label("Delete Memory", systemImage: "trash")
+                    }
                 } label: {
-                    Image(systemName: "square.and.arrow.up")
+                    Image(systemName: "ellipsis")
                         .font(.body.weight(.semibold))
                         .foregroundStyle(.white)
                         .frame(width: 36, height: 36)
@@ -377,6 +400,13 @@ struct MemoryMediaSheet: View {
                             }
                             .clipShape(.rect(cornerRadius: 8))
                     }
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            viewModel.removePhotoURL(from: memoryID, url: url)
+                        } label: {
+                            Label("Delete Photo", systemImage: "trash")
+                        }
+                    }
                 }
             }
             .padding(.horizontal, 20)
@@ -443,6 +473,13 @@ struct MemoryMediaSheet: View {
                                 onVideoTap(video)
                             } label: {
                                 VideoThumbnailCard(video: video)
+                            }
+                            .contextMenu {
+                                Button(role: .destructive) {
+                                    viewModel.removeVideo(from: memoryID, video: video)
+                                } label: {
+                                    Label("Delete Video", systemImage: "trash")
+                                }
                             }
                         }
                     }
