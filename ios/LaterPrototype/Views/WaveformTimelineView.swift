@@ -3,8 +3,13 @@ import SwiftUI
 struct WaveformTimelineView: View {
     let memories: [Memory]
     let onMemorySelected: (Memory) -> Void
-    @State private var scrollOffset: CGFloat = 0
-    @State private var selectedIndex: Int = 0
+    @State private var selectedID: UUID?
+
+    private let barWidth: CGFloat = 2
+    private let barSpacing: CGFloat = 1
+    private let sampleCount: Int = 200
+    /// Inset (as a fraction of width) so markers never sit on the extreme edges.
+    private let edgeInset: Double = 0.04
 
     private let waveformSamples: [CGFloat] = {
         var samples: [CGFloat] = []
@@ -20,6 +25,20 @@ struct WaveformTimelineView: View {
         return samples
     }()
 
+    private var contentWidth: CGFloat {
+        CGFloat(sampleCount) * barWidth + CGFloat(sampleCount - 1) * barSpacing
+    }
+
+    /// Memories sorted chronologically.
+    private var sortedMemories: [Memory] {
+        memories.sorted { $0.date < $1.date }
+    }
+
+    private var selectedMemory: Memory? {
+        guard let selectedID else { return sortedMemories.last }
+        return sortedMemories.first { $0.id == selectedID } ?? sortedMemories.last
+    }
+
     var body: some View {
         VStack(spacing: 6) {
             HStack {
@@ -27,8 +46,8 @@ struct WaveformTimelineView: View {
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.secondary)
                 Spacer()
-                if memories.indices.contains(selectedIndex) {
-                    Text(memories[selectedIndex].date, style: .date)
+                if let memory = selectedMemory {
+                    Text(memory.date, style: .date)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.primary)
                 }
@@ -36,37 +55,31 @@ struct WaveformTimelineView: View {
             .padding(.horizontal, 20)
 
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .center, spacing: 1) {
-                    ForEach(Array(waveformSamples.enumerated()), id: \.offset) { index, sample in
-                        let isHighlighted = isNearMemoryMarker(index: index)
-                        RoundedRectangle(cornerRadius: 1)
-                            .fill(isHighlighted ? Color.red : Color.primary.opacity(0.7))
-                            .frame(width: 2, height: max(2, abs(sample) * 40 + 4))
+                ZStack(alignment: .topLeading) {
+                    HStack(alignment: .center, spacing: barSpacing) {
+                        ForEach(Array(waveformSamples.enumerated()), id: \.offset) { _, sample in
+                            RoundedRectangle(cornerRadius: 1)
+                                .fill(Color.primary.opacity(0.7))
+                                .frame(width: barWidth, height: max(2, abs(sample) * 40 + 4))
+                        }
+                    }
+                    .frame(width: contentWidth, height: 56)
+
+                    ForEach(sortedMemories) { memory in
+                        let x = xPosition(for: memory.date)
+                        TimelineMarker(isSelected: memory.id == selectedMemory?.id) {
+                            selectedID = memory.id
+                            onMemorySelected(memory)
+                        }
+                        .position(x: x, y: 28)
                     }
                 }
-                .frame(height: 50)
+                .frame(width: contentWidth, height: 56)
                 .padding(.horizontal, 16)
             }
             .contentMargins(.horizontal, 16)
 
-            HStack(spacing: 0) {
-                ForEach(Array(memories.enumerated()), id: \.element.id) { index, memory in
-                    Button {
-                        selectedIndex = index
-                        onMemorySelected(memory)
-                    } label: {
-                        Text(shortDate(memory.date))
-                            .font(.system(size: 10, weight: selectedIndex == index ? .bold : .regular, design: .monospaced))
-                            .foregroundStyle(selectedIndex == index ? .primary : .tertiary)
-                    }
-                    if index < memories.count - 1 {
-                        Spacer()
-                    }
-                }
-            }
-            .padding(.horizontal, 20)
-
-            Text("Line gets larger and smaller at points with more memory pins dropped")
+            Text("Tap a red marker to jump to that memory")
                 .font(.system(size: 9))
                 .foregroundStyle(.tertiary)
                 .padding(.bottom, 8)
@@ -79,21 +92,41 @@ struct WaveformTimelineView: View {
         )
     }
 
-    private func isNearMemoryMarker(index: Int) -> Bool {
-        guard !memories.isEmpty else { return false }
-        let segmentSize = waveformSamples.count / max(memories.count, 1)
-        for i in 0..<memories.count {
-            let markerIndex = i * segmentSize + segmentSize / 2
-            if abs(index - markerIndex) < 3 {
-                return true
-            }
+    /// Maps a memory's date onto a horizontal position across the waveform.
+    private func xPosition(for date: Date) -> CGFloat {
+        let dates = sortedMemories.map { $0.date.timeIntervalSince1970 }
+        guard let minDate = dates.first, let maxDate = dates.last else {
+            return contentWidth / 2
         }
-        return false
+        let usableWidth = contentWidth * (1 - 2 * edgeInset)
+        let startX = contentWidth * edgeInset
+        guard maxDate > minDate else {
+            return contentWidth / 2
+        }
+        let normalized = (date.timeIntervalSince1970 - minDate) / (maxDate - minDate)
+        return startX + CGFloat(normalized) * usableWidth
     }
+}
 
-    private func shortDate(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "M-dd-yy"
-        return formatter.string(from: date)
+private struct TimelineMarker: View {
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 2) {
+                Circle()
+                    .fill(Color.red)
+                    .frame(width: isSelected ? 10 : 7, height: isSelected ? 10 : 7)
+                    .shadow(color: .red.opacity(0.7), radius: isSelected ? 6 : 3)
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Color.red)
+                    .frame(width: isSelected ? 3 : 2, height: 50)
+            }
+            .frame(width: 44, height: 56)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .animation(.spring(duration: 0.3), value: isSelected)
     }
 }
