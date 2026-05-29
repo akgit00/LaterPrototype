@@ -1,6 +1,8 @@
 import SwiftUI
 import MapKit
 import PhotosUI
+import AVKit
+import UniformTypeIdentifiers
 
 struct MemoryRoomView: View {
     let memoryID: UUID
@@ -15,6 +17,8 @@ struct MemoryRoomView: View {
     @State private var showAddPlaylistSheet: Bool = false
     @State private var showAddPeopleSheet: Bool = false
     @State private var selectedPhotosItems: [PhotosPickerItem] = []
+    @State private var isImportingMedia: Bool = false
+    @State private var playingVideoURL: URL?
 
     private var memory: Memory {
         viewModel.memoryByID(memoryID) ?? Memory(title: "", centerCoordinate: CLLocationCoordinate2D())
@@ -75,7 +79,13 @@ struct MemoryRoomView: View {
                 },
                 onAddPeople: {
                     showAddPeopleSheet = true
-                }
+                },
+                onVideoTap: { video in
+                    if let urlString = video.videoURL, let url = URL(string: urlString) {
+                        playingVideoURL = url
+                    }
+                },
+                isImporting: isImportingMedia
             )
             .presentationDetents([.fraction(0.15), .fraction(0.45), .large], selection: $selectedDetent)
             .presentationDragIndicator(.visible)
@@ -90,6 +100,15 @@ struct MemoryRoomView: View {
             }
         }
         .photosPicker(isPresented: $showAddPhotosPicker, selection: $selectedPhotosItems, maxSelectionCount: 10, matching: .any(of: [.images, .videos]))
+        .onChange(of: selectedPhotosItems) { _, items in
+            guard !items.isEmpty else { return }
+            let captured = items
+            selectedPhotosItems = []
+            Task { await importPickedItems(captured) }
+        }
+        .fullScreenCover(item: $playingVideoURL) { url in
+            VideoPlayerView(url: url)
+        }
         .sheet(isPresented: $showAddPlaylistSheet) {
             AddPlaylistSheet(memoryID: memoryID, viewModel: viewModel)
                 .presentationDetents([.medium])
@@ -97,6 +116,32 @@ struct MemoryRoomView: View {
         .sheet(isPresented: $showAddPeopleSheet) {
             AddPeopleSheet(memoryID: memoryID, viewModel: viewModel)
                 .presentationDetents([.medium, .large])
+        }
+    }
+
+    private func importPickedItems(_ items: [PhotosPickerItem]) async {
+        isImportingMedia = true
+        defer { isImportingMedia = false }
+
+        for item in items {
+            let isVideo = item.supportedContentTypes.contains { $0.conforms(to: .movie) }
+            guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
+
+            if isVideo {
+                guard let urlString = MediaStore.saveVideo(data), let url = URL(string: urlString) else { continue }
+                let thumbnail = await MediaStore.generateThumbnail(for: url)
+                let duration = await MediaStore.durationString(for: url)
+                let video = VideoAttachment(
+                    thumbnailURL: thumbnail ?? "",
+                    title: "Video",
+                    duration: duration,
+                    videoURL: urlString
+                )
+                viewModel.addVideo(to: memoryID, video: video)
+            } else {
+                guard let urlString = MediaStore.saveImage(data) else { continue }
+                viewModel.addPhotoURL(to: memoryID, url: urlString)
+            }
         }
     }
 
@@ -166,6 +211,8 @@ struct MemoryMediaSheet: View {
     let onAddPhotos: () -> Void
     let onAddPlaylist: () -> Void
     let onAddPeople: () -> Void
+    let onVideoTap: (VideoAttachment) -> Void
+    let isImporting: Bool
 
     @State private var selectedSection: MediaSection = .photos
 
@@ -279,6 +326,10 @@ struct MemoryMediaSheet: View {
                 Text("\(memory.photoURLs.count) Photos")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
+                if isImporting {
+                    ProgressView()
+                        .controlSize(.small)
+                }
                 Spacer()
                 Button {
                     onAddPhotos()
@@ -321,19 +372,8 @@ struct MemoryMediaSheet: View {
                         Color(.secondarySystemBackground)
                             .aspectRatio(1, contentMode: .fill)
                             .overlay {
-                                AsyncImage(url: URL(string: url)) { phase in
-                                    if let image = phase.image {
-                                        image
-                                            .resizable()
-                                            .aspectRatio(contentMode: .fill)
-                                            .allowsHitTesting(false)
-                                    } else if phase.error != nil {
-                                        Image(systemName: "photo")
-                                            .foregroundStyle(.tertiary)
-                                    } else {
-                                        ProgressView()
-                                    }
-                                }
+                                MediaImageView(urlString: url)
+                                    .allowsHitTesting(false)
                             }
                             .clipShape(.rect(cornerRadius: 8))
                     }
@@ -399,7 +439,11 @@ struct MemoryMediaSheet: View {
                         }
 
                         ForEach(memory.videos) { video in
-                            VideoThumbnailCard(video: video)
+                            Button {
+                                onVideoTap(video)
+                            } label: {
+                                VideoThumbnailCard(video: video)
+                            }
                         }
                     }
                     .padding(.horizontal, 20)
@@ -809,14 +853,8 @@ struct VideoThumbnailCard: View {
         Color(.secondarySystemBackground)
             .frame(width: 180, height: 120)
             .overlay {
-                AsyncImage(url: URL(string: video.thumbnailURL)) { phase in
-                    if let image = phase.image {
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                            .allowsHitTesting(false)
-                    }
-                }
+                MediaImageView(urlString: video.thumbnailURL)
+                    .allowsHitTesting(false)
             }
             .clipShape(.rect(cornerRadius: 12))
             .overlay(alignment: .center) {
@@ -934,20 +972,8 @@ struct PhotoPinView: View {
             Color(.secondarySystemBackground)
                 .frame(width: 72, height: 72)
                 .overlay {
-                    AsyncImage(url: URL(string: imageURL)) { phase in
-                        if let image = phase.image {
-                            image
-                                .resizable()
-                                .aspectRatio(contentMode: .fill)
-                                .allowsHitTesting(false)
-                        } else if phase.error != nil {
-                            Image(systemName: "photo")
-                                .foregroundStyle(.secondary)
-                        } else {
-                            ProgressView()
-                                .tint(.white)
-                        }
-                    }
+                    MediaImageView(urlString: imageURL)
+                        .allowsHitTesting(false)
                 }
                 .clipShape(.rect(cornerRadius: 8))
                 .shadow(color: .black.opacity(0.4), radius: 6, x: 0, y: 3)
@@ -1074,19 +1100,7 @@ struct PhotoViewerSheet: View {
                 ForEach(Array(photoURLs.enumerated()), id: \.offset) { index, url in
                     Color.clear
                         .overlay {
-                            AsyncImage(url: URL(string: url)) { phase in
-                                if let image = phase.image {
-                                    image
-                                        .resizable()
-                                        .aspectRatio(contentMode: .fit)
-                                } else if phase.error != nil {
-                                    Image(systemName: "photo")
-                                        .font(.largeTitle)
-                                        .foregroundStyle(.secondary)
-                                } else {
-                                    ProgressView()
-                                }
-                            }
+                            MediaImageView(urlString: url, contentMode: .fit)
                         }
                         .tag(index)
                 }
@@ -1105,6 +1119,38 @@ struct PhotoViewerSheet: View {
                             .foregroundStyle(.white)
                     }
                 }
+            }
+        }
+    }
+}
+
+struct VideoPlayerView: View {
+    let url: URL
+    @Environment(\.dismiss) private var dismiss
+    @State private var player: AVPlayer
+
+    init(url: URL) {
+        self.url = url
+        _player = State(initialValue: AVPlayer(url: url))
+    }
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Color.black.ignoresSafeArea()
+
+            VideoPlayer(player: player)
+                .ignoresSafeArea()
+                .onAppear { player.play() }
+                .onDisappear { player.pause() }
+
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.title)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.white)
+                    .padding(16)
             }
         }
     }

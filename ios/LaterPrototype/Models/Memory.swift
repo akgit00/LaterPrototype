@@ -89,12 +89,15 @@ nonisolated struct VideoAttachment: Identifiable, Sendable {
     let thumbnailURL: String
     let title: String
     let duration: String
+    /// File URL string of the actual playable video, when imported from the library.
+    let videoURL: String?
 
-    init(id: UUID = UUID(), thumbnailURL: String, title: String, duration: String = "") {
+    init(id: UUID = UUID(), thumbnailURL: String, title: String, duration: String = "", videoURL: String? = nil) {
         self.id = id
         self.thumbnailURL = thumbnailURL
         self.title = title
         self.duration = duration
+        self.videoURL = videoURL
     }
 }
 

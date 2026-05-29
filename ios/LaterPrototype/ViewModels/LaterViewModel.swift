@@ -56,6 +56,11 @@ final class LaterViewModel {
         memories[index].photoURLs.append(url)
     }
 
+    func addVideo(to memoryID: UUID, video: VideoAttachment) {
+        guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        memories[index].videos.append(video)
+    }
+
     func setPlaylist(for memoryID: UUID, playlist: PlaylistAttachment) {
         guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
         memories[index].playlist = playlist
