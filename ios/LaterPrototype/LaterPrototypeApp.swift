@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct PDFGuideDesignProjectApp: App {
+struct LaterPrototypeApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()

@@ -1,13 +1,13 @@
 //
-//  PDFGuideDesignProjectUITestsLaunchTests.swift
-//  PDFGuideDesignProjectUITests
+//  LaterPrototypeUITestsLaunchTests.swift
+//  LaterPrototypeUITests
 //
 //  Created by Rork on March 3, 2026.
 //
 
 import XCTest
 
-final class PDFGuideDesignProjectUITestsLaunchTests: XCTestCase {
+final class LaterPrototypeUITestsLaunchTests: XCTestCase {
 
     override class var runsForEachTargetApplicationUIConfiguration: Bool {
         true
