@@ -46,6 +46,42 @@ final class LaterViewModel {
         rebuildGlobalPins()
     }
 
+    func deleteMemory(_ id: UUID) {
+        guard let index = memories.firstIndex(where: { $0.id == id }) else { return }
+        let memory = memories[index]
+        for url in memory.photoURLs {
+            MediaStore.deleteFile(at: url)
+        }
+        for video in memory.videos {
+            if let videoURL = video.videoURL {
+                MediaStore.deleteFile(at: videoURL)
+            }
+            MediaStore.deleteFile(at: video.thumbnailURL)
+        }
+        memories.remove(at: index)
+        if selectedMemory?.id == id {
+            selectedMemory = nil
+        }
+        rebuildGlobalPins()
+    }
+
+    func removePhotoURL(from memoryID: UUID, url: String) {
+        guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        memories[index].photoURLs.removeAll { $0 == url }
+        memories[index].pins.removeAll { $0.imageURL == url }
+        MediaStore.deleteFile(at: url)
+        rebuildGlobalPins()
+    }
+
+    func removeVideo(from memoryID: UUID, video: VideoAttachment) {
+        guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        memories[index].videos.removeAll { $0.id == video.id }
+        if let videoURL = video.videoURL {
+            MediaStore.deleteFile(at: videoURL)
+        }
+        MediaStore.deleteFile(at: video.thumbnailURL)
+    }
+
     func addComment(to memoryID: UUID, comment: Comment) {
         guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
         memories[index].comments.append(comment)

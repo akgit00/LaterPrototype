@@ -39,6 +39,12 @@ nonisolated enum MediaStore {
         }
     }
 
+    /// Deletes a media file from disk if it is a local file URL. No-op for remote URLs.
+    static func deleteFile(at urlString: String) {
+        guard let url = URL(string: urlString), url.isFileURL else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+
     /// Generates a thumbnail image for a video and persists it, returning its file URL string.
     static func generateThumbnail(for videoURL: URL) async -> String? {
         let asset = AVURLAsset(url: videoURL)
