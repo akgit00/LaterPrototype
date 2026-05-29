@@ -2,6 +2,14 @@ import SwiftUI
 import AuthenticationServices
 import CryptoKit
 
+/// Authentication backed by Supabase Auth (GoTrue).
+///
+/// - Sign in with Apple uses the native flow: Apple returns an identity token
+///   on-device, which we exchange with Supabase for a session (no web browser).
+/// - Sign in with Google uses Supabase's hosted OAuth flow via
+///   `ASWebAuthenticationSession`.
+///
+/// Sessions persist in the Keychain and are refreshed automatically.
 @Observable
 class AuthManager {
     var user: User?
@@ -9,16 +17,16 @@ class AuthManager {
     var isSigningIn = false
     var showError = false
     var errorMessage = ""
+    /// Informational (non-error) message, e.g. "Check your email to confirm."
+    var notice: String?
 
-    private let authURL = AuthConfig.authURL
-    private let appKey = AuthConfig.appKey
-    private let projectID = AuthConfig.projectID
-    private var codeVerifier: String?
+    private let baseURL = SupabaseConfig.url
+    private let anonKey = SupabaseConfig.anonKey
+    private var currentNonce: String?
     private var webAuthSession: ASWebAuthenticationSession?
 
-    private var developerHint: String? {
-        UserDefaults.standard.string(forKey: "RORK_DEVELOPER_HINT")
-    }
+    private let accessKey = "sb_access_token"
+    private let refreshKey = "sb_refresh_token"
 
     struct User: Codable {
         let id: String
@@ -31,30 +39,382 @@ class AuthManager {
         Task { await checkAuth() }
     }
 
-    private func generateCodeVerifier() -> String {
-        var bytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        return Data(bytes).base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
+    /// Synchronous access token for authenticated Supabase data requests.
+    func getAccessToken() -> String? {
+        KeychainHelper.get(accessKey)
     }
 
-    private func generateCodeChallenge(from verifier: String) -> String {
-        let data = Data(verifier.utf8)
-        let hash = SHA256.hash(data: data)
-        return Data(hash).base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
+    // MARK: - Session restore
+
+    @MainActor
+    func checkAuth() async {
+        defer { isLoading = false }
+
+        if let accessToken = KeychainHelper.get(accessKey),
+           let user = userFromToken(accessToken) {
+            self.user = user
+            return
+        }
+
+        if KeychainHelper.get(refreshKey) != nil {
+            await refreshSession()
+        }
     }
 
-    private var authEnv: String {
-        #if targetEnvironment(simulator)
-        return "simulator"
-        #else
-        return "native"
-        #endif
+    // MARK: - Apple
+
+    /// Configures the Apple authorization request: scopes + a hashed nonce.
+    func prepareAppleRequest(_ request: ASAuthorizationAppleIDRequest) {
+        let nonce = randomNonceString()
+        currentNonce = nonce
+        request.requestedScopes = [.email, .fullName]
+        request.nonce = sha256(nonce)
+    }
+
+    @MainActor
+    func signInWithApple(_ authorization: ASAuthorization) async {
+        guard SupabaseConfig.isConfigured else {
+            setError("Supabase isn't configured yet. Add your project URL and anon key.")
+            return
+        }
+        guard let credential = authorization.credential as? ASAuthorizationAppleIDCredential,
+              let tokenData = credential.identityToken,
+              let idToken = String(data: tokenData, encoding: .utf8) else {
+            setError("Couldn't read your Apple credentials. Please try again.")
+            return
+        }
+
+        isSigningIn = true
+        defer { isSigningIn = false }
+
+        // Apple only sends the full name on the very first sign-in.
+        let fullName = [credential.fullName?.givenName, credential.fullName?.familyName]
+            .compactMap { $0 }
+            .joined(separator: " ")
+
+        var body: [String: String] = ["provider": "apple", "id_token": idToken]
+        if let nonce = currentNonce { body["nonce"] = nonce }
+        currentNonce = nil
+
+        await exchangeIDToken(body: body, fallbackName: fullName.isEmpty ? nil : fullName)
+    }
+
+    // MARK: - Email + Password
+
+    @MainActor
+    func signUpWithEmail(email: String, password: String) async {
+        await emailAuth(
+            path: "/auth/v1/signup",
+            email: email,
+            body: ["email": email, "password": password],
+            isSignUp: true
+        )
+    }
+
+    @MainActor
+    func signInWithEmail(email: String, password: String) async {
+        await emailAuth(
+            path: "/auth/v1/token?grant_type=password",
+            email: email,
+            body: ["email": email, "password": password],
+            isSignUp: false
+        )
+    }
+
+    private func emailAuth(path: String, email: String, body: [String: String], isSignUp: Bool) async {
+        guard SupabaseConfig.isConfigured else {
+            setError("Supabase isn't configured yet. Add your project URL and anon key.")
+            return
+        }
+        guard let url = URL(string: "\(baseURL)\(path)") else {
+            setError("Invalid Supabase URL")
+            return
+        }
+
+        isSigningIn = true
+        defer { isSigningIn = false }
+
+        do {
+            let (data, http) = try await postRaw(url: url, body: body)
+            guard http.statusCode == 200 else {
+                throw decodeError(from: data, statusCode: http.statusCode)
+            }
+            if let session = try? JSONDecoder().decode(SupabaseSession.self, from: data),
+               !session.access_token.isEmpty {
+                storeSession(accessToken: session.access_token, refreshToken: session.refresh_token)
+                user = makeUser(from: session, fallbackName: nil)
+            } else if isSignUp {
+                // Email confirmation is enabled: no session is returned yet.
+                notice = "We sent a confirmation link to \(email). Confirm it, then sign in."
+            } else {
+                setError("Sign in failed: incomplete session.")
+            }
+        } catch let error as AuthError {
+            setError(error.errorDescription ?? "Sign in failed")
+        } catch {
+            setError("Sign in failed: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Email one-time code (magic link / OTP)
+
+    /// Sends a one-time login code / magic link to the given email.
+    /// Returns `true` if the email was dispatched successfully.
+    @MainActor
+    func sendEmailCode(email: String) async -> Bool {
+        guard SupabaseConfig.isConfigured else {
+            setError("Supabase isn't configured yet. Add your project URL and anon key.")
+            return false
+        }
+        guard let url = URL(string: "\(baseURL)/auth/v1/otp") else {
+            setError("Invalid Supabase URL")
+            return false
+        }
+
+        isSigningIn = true
+        defer { isSigningIn = false }
+
+        do {
+            let (data, http) = try await postRaw(
+                url: url,
+                body: ["email": email, "create_user": "true"]
+            )
+            guard http.statusCode == 200 else {
+                throw decodeError(from: data, statusCode: http.statusCode)
+            }
+            return true
+        } catch let error as AuthError {
+            setError(error.errorDescription ?? "Couldn't send the code")
+            return false
+        } catch {
+            setError("Couldn't send the code: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// Verifies the 6-digit code the user received by email.
+    @MainActor
+    func verifyEmailCode(email: String, code: String) async {
+        guard let url = URL(string: "\(baseURL)/auth/v1/verify") else {
+            setError("Invalid Supabase URL")
+            return
+        }
+
+        isSigningIn = true
+        defer { isSigningIn = false }
+
+        do {
+            let (data, http) = try await postRaw(
+                url: url,
+                body: ["email": email, "token": code, "type": "email"]
+            )
+            guard http.statusCode == 200 else {
+                throw decodeError(from: data, statusCode: http.statusCode)
+            }
+            let session = try JSONDecoder().decode(SupabaseSession.self, from: data)
+            storeSession(accessToken: session.access_token, refreshToken: session.refresh_token)
+            user = makeUser(from: session, fallbackName: nil)
+        } catch let error as AuthError {
+            setError(error.errorDescription ?? "Invalid or expired code")
+        } catch {
+            setError("Invalid or expired code. Please try again.")
+        }
+    }
+
+    // MARK: - Google
+
+    @MainActor
+    func signIn(provider: String) async {
+        // Apple has its own native entry point; this handles Google (and any
+        // other browser-based provider).
+        guard SupabaseConfig.isConfigured else {
+            setError("Supabase isn't configured yet. Add your project URL and anon key.")
+            return
+        }
+
+        isSigningIn = true
+        defer { isSigningIn = false }
+
+        guard var components = URLComponents(string: "\(baseURL)/auth/v1/authorize") else {
+            setError("Invalid Supabase URL")
+            return
+        }
+        components.queryItems = [
+            URLQueryItem(name: "provider", value: provider),
+            URLQueryItem(name: "redirect_to", value: SupabaseConfig.redirectURL),
+        ]
+
+        guard let authURL = components.url else {
+            setError("Invalid Supabase URL")
+            return
+        }
+
+        do {
+            let callbackURL = try await runWebAuthSession(url: authURL)
+            await handleOAuthCallback(callbackURL)
+        } catch let error as ASWebAuthenticationSessionError where error.code == .canceledLogin {
+            return
+        } catch {
+            setError(error.localizedDescription)
+        }
+    }
+
+    private func runWebAuthSession(url: URL) async throws -> URL {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
+            let session = ASWebAuthenticationSession(
+                url: url,
+                callbackURLScheme: SupabaseConfig.callbackScheme
+            ) { [weak self] callbackURL, error in
+                self?.webAuthSession = nil
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                guard let callbackURL else {
+                    continuation.resume(throwing: AuthError.noCode)
+                    return
+                }
+                continuation.resume(returning: callbackURL)
+            }
+            self.webAuthSession = session
+            session.presentationContextProvider = WebAuthPresentationContext.shared
+            session.prefersEphemeralWebBrowserSession = false
+            session.start()
+        }
+    }
+
+    /// Supabase returns tokens in the URL fragment (implicit flow).
+    @MainActor
+    private func handleOAuthCallback(_ url: URL) async {
+        guard let fragment = URLComponents(url: url, resolvingAgainstBaseURL: false)?.fragment else {
+            setError("Sign in failed: no session returned.")
+            return
+        }
+
+        var params: [String: String] = [:]
+        for pair in fragment.split(separator: "&") {
+            let kv = pair.split(separator: "=", maxSplits: 1)
+            if kv.count == 2 {
+                params[String(kv[0])] = String(kv[1]).removingPercentEncoding ?? String(kv[1])
+            }
+        }
+
+        if let errorDescription = params["error_description"] {
+            setError(errorDescription.replacingOccurrences(of: "+", with: " "))
+            return
+        }
+
+        guard let accessToken = params["access_token"],
+              let refreshToken = params["refresh_token"] else {
+            setError("Sign in failed: incomplete session.")
+            return
+        }
+
+        storeSession(accessToken: accessToken, refreshToken: refreshToken)
+        user = userFromToken(accessToken)
+    }
+
+    // MARK: - Token exchange & refresh
+
+    @MainActor
+    private func exchangeIDToken(body: [String: String], fallbackName: String?) async {
+        guard let url = URL(string: "\(baseURL)/auth/v1/token?grant_type=id_token") else {
+            setError("Invalid Supabase URL")
+            return
+        }
+
+        do {
+            let session = try await postSession(url: url, body: body)
+            storeSession(accessToken: session.access_token, refreshToken: session.refresh_token)
+            user = makeUser(from: session, fallbackName: fallbackName)
+        } catch let error as AuthError {
+            setError(error.errorDescription ?? "Sign in failed")
+        } catch {
+            setError("Sign in failed: \(error.localizedDescription)")
+        }
+    }
+
+    @MainActor
+    private func refreshSession() async {
+        guard let refreshToken = KeychainHelper.get(refreshKey),
+              let url = URL(string: "\(baseURL)/auth/v1/token?grant_type=refresh_token") else {
+            await signOut()
+            return
+        }
+
+        do {
+            let session = try await postSession(url: url, body: ["refresh_token": refreshToken])
+            storeSession(accessToken: session.access_token, refreshToken: session.refresh_token)
+            user = makeUser(from: session, fallbackName: nil)
+        } catch {
+            await signOut()
+        }
+    }
+
+    private func postSession(url: URL, body: [String: String]) async throws -> SupabaseSession {
+        let (data, http) = try await postRaw(url: url, body: body)
+        guard http.statusCode == 200 else {
+            throw decodeError(from: data, statusCode: http.statusCode)
+        }
+        return try JSONDecoder().decode(SupabaseSession.self, from: data)
+    }
+
+    /// Performs a POST to a Supabase auth endpoint and returns the raw response.
+    private func postRaw(url: URL, body: [String: String]) async throws -> (Data, HTTPURLResponse) {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(anonKey, forHTTPHeaderField: "apikey")
+        request.setValue("Bearer \(anonKey)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONEncoder().encode(body)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw AuthError.serverError(statusCode: -1)
+        }
+        return (data, http)
+    }
+
+    private func decodeError(from data: Data, statusCode: Int) -> AuthError {
+        if let err = try? JSONDecoder().decode(SupabaseError.self, from: data),
+           let message = err.displayMessage {
+            return .message(message)
+        }
+        return .serverError(statusCode: statusCode)
+    }
+
+    // MARK: - Sign out
+
+    @MainActor
+    func signOut() async {
+        if let token = KeychainHelper.get(accessKey),
+           let url = URL(string: "\(baseURL)/auth/v1/logout") {
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue(anonKey, forHTTPHeaderField: "apikey")
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            _ = try? await URLSession.shared.data(for: request)
+        }
+        KeychainHelper.delete(accessKey)
+        KeychainHelper.delete(refreshKey)
+        user = nil
+    }
+
+    // MARK: - Helpers
+
+    private func storeSession(accessToken: String, refreshToken: String) {
+        KeychainHelper.set(accessKey, value: accessToken)
+        KeychainHelper.set(refreshKey, value: refreshToken)
+    }
+
+    private func makeUser(from session: SupabaseSession, fallbackName: String?) -> User? {
+        if let sessionUser = session.user {
+            let meta = sessionUser.user_metadata
+            let name = meta?.full_name ?? meta?.name ?? fallbackName
+            let picture = meta?.picture ?? meta?.avatar_url
+            return User(id: sessionUser.id, email: sessionUser.email ?? "", name: name, picture: picture)
+        }
+        return userFromToken(session.access_token)
     }
 
     /// Decode the JWT payload to extract user info and check expiration.
@@ -72,9 +432,8 @@ class AuthManager {
         struct JWTPayload: Codable {
             let sub: String
             let email: String?
-            let name: String?
-            let picture: String?
             let exp: TimeInterval?
+            let user_metadata: SupabaseUser.Metadata?
         }
 
         guard let payload = try? JSONDecoder().decode(JWTPayload.self, from: data) else { return nil }
@@ -83,287 +442,84 @@ class AuthManager {
             return nil
         }
 
-        return User(id: payload.sub, email: payload.email ?? "", name: payload.name, picture: payload.picture)
-    }
-
-    private func getRefreshToken() -> String? {
-        #if targetEnvironment(simulator)
-        if let ud = UserDefaults.standard.string(forKey: "RORK_AUTH_REFRESH_TOKEN") {
-            return ud
-        }
-        #endif
-        return KeychainHelper.get("refresh_token")
-    }
-
-    @MainActor
-    func checkAuth() async {
-        defer { isLoading = false }
-
-        if let accessToken = KeychainHelper.get("access_token"),
-           let user = userFromToken(accessToken) {
-            self.user = user
-            return
-        }
-
-        if getRefreshToken() != nil {
-            await refreshToken()
-        }
-    }
-
-    @MainActor
-    func signIn(provider: String) async {
-        isSigningIn = true
-        defer { isSigningIn = false }
-        do {
-            let verifier = generateCodeVerifier()
-            let challenge = generateCodeChallenge(from: verifier)
-            codeVerifier = verifier
-
-            guard let url = URL(string: "\(authURL)/oauth/initiate") else {
-                setError("Invalid URL")
-                return
-            }
-
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            var initiateBody: [String: String] = [
-                "app_key": appKey,
-                "provider": provider,
-                "code_challenge": challenge,
-                "target": "swift",
-                "env": authEnv,
-            ]
-            if authEnv == "simulator", let hint = developerHint {
-                initiateBody["developer_hint"] = hint
-            }
-            request.httpBody = try JSONEncoder().encode(initiateBody)
-
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-                let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
-                if let errorResponse = try? JSONDecoder().decode(ErrorResponse.self, from: data) {
-                    setError(errorResponse.error)
-                } else {
-                    setError("Sign in failed (\(statusCode))")
-                }
-                return
-            }
-            let initiateResponse = try JSONDecoder().decode(InitiateResponse.self, from: data)
-
-            let code: String
-            if initiateResponse.flow == "popup" {
-                do {
-                    code = try await pollForCode(state: initiateResponse.state)
-                } catch AuthError.cancelledByUser {
-                    code = try await runWebAuthSession(authURL: initiateResponse.auth_url)
-                }
-            } else {
-                code = try await runWebAuthSession(authURL: initiateResponse.auth_url)
-            }
-
-            await exchangeCode(code)
-        } catch let error as ASWebAuthenticationSessionError where error.code == .canceledLogin {
-            return
-        } catch {
-            setError(error.localizedDescription)
-        }
-    }
-
-    private func pollForCode(state: String) async throws -> String {
-        guard let url = URL(string: "\(authURL)/oauth/poll-code") else {
-            throw AuthError.invalidURL
-        }
-
-        let deadline = Date().addingTimeInterval(5 * 60)
-        while Date() < deadline {
-            try await Task.sleep(nanoseconds: 1_500_000_000)
-
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try JSONEncoder().encode(["app_key": appKey, "state": state])
-
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else { continue }
-
-            guard let pollResponse = try? JSONDecoder().decode(PollCodeResponse.self, from: data) else { continue }
-
-            if pollResponse.status == "cancelled" {
-                throw AuthError.cancelledByUser
-            }
-
-            if pollResponse.status == "ready", let code = pollResponse.code {
-                return code
-            }
-        }
-
-        throw AuthError.popupTimeout
-    }
-
-    private func runWebAuthSession(authURL authURLString: String) async throws -> String {
-        let callbackScheme = "rork-\(projectID)"
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
-            guard let url = URL(string: authURLString) else {
-                continuation.resume(throwing: AuthError.invalidURL)
-                return
-            }
-
-            let session = ASWebAuthenticationSession(
-                url: url,
-                callbackURLScheme: callbackScheme
-            ) { [weak self] callbackURL, error in
-                self?.webAuthSession = nil
-
-                if let error {
-                    continuation.resume(throwing: error)
-                    return
-                }
-
-                guard let url = callbackURL,
-                      let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-                      let code = components.queryItems?.first(where: { $0.name == "code" })?.value else {
-                    continuation.resume(throwing: AuthError.noCode)
-                    return
-                }
-
-                continuation.resume(returning: code)
-            }
-
-            self.webAuthSession = session
-            session.presentationContextProvider = WebAuthPresentationContext.shared
-            session.prefersEphemeralWebBrowserSession = false
-            session.start()
-        }
-    }
-
-    @MainActor
-    private func exchangeCode(_ code: String) async {
-        guard let verifier = codeVerifier else { return }
-        codeVerifier = nil
-
-        guard let url = URL(string: "\(authURL)/oauth/token") else { return }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONEncoder().encode([
-            "app_key": appKey,
-            "code": code,
-            "code_verifier": verifier,
-        ])
-
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-                let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
-                if let errorResponse = try? JSONDecoder().decode(ErrorResponse.self, from: data) {
-                    setError(errorResponse.error)
-                } else {
-                    setError("Sign in failed (\(statusCode))")
-                }
-                return
-            }
-            let tokenResponse = try JSONDecoder().decode(TokenResponse.self, from: data)
-
-            KeychainHelper.set("access_token", value: tokenResponse.access_token)
-            KeychainHelper.set("refresh_token", value: tokenResponse.refresh_token)
-
-            user = tokenResponse.user
-        } catch {
-            setError("Sign in failed: \(error.localizedDescription)")
-        }
-    }
-
-    @MainActor
-    private func refreshToken() async {
-        guard let storedRefreshToken = getRefreshToken() else {
-            user = nil
-            return
-        }
-
-        guard let url = URL(string: "\(authURL)/oauth/refresh") else { return }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONEncoder().encode([
-            "app_key": appKey,
-            "refresh_token": storedRefreshToken,
-        ])
-
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                await signOut()
-                return
-            }
-
-            let refreshResponse = try JSONDecoder().decode(RefreshResponse.self, from: data)
-            KeychainHelper.set("access_token", value: refreshResponse.access_token)
-
-            user = userFromToken(refreshResponse.access_token)
-        } catch {
-            await signOut()
-        }
-    }
-
-    @MainActor
-    func signOut() async {
-        KeychainHelper.delete("access_token")
-        KeychainHelper.delete("refresh_token")
-        UserDefaults.standard.removeObject(forKey: "RORK_AUTH_REFRESH_TOKEN")
-        user = nil
+        let meta = payload.user_metadata
+        let name = meta?.full_name ?? meta?.name
+        let picture = meta?.picture ?? meta?.avatar_url
+        return User(id: payload.sub, email: payload.email ?? "", name: name, picture: picture)
     }
 
     private func setError(_ message: String) {
         errorMessage = message
         showError = true
     }
+
+    // MARK: - Nonce / hashing
+
+    private func randomNonceString(length: Int = 32) -> String {
+        let charset: [Character] = Array("0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._")
+        var result = ""
+        var remaining = length
+        while remaining > 0 {
+            var random: UInt8 = 0
+            _ = SecRandomCopyBytes(kSecRandomDefault, 1, &random)
+            if random < charset.count {
+                result.append(charset[Int(random)])
+                remaining -= 1
+            }
+        }
+        return result
+    }
+
+    private func sha256(_ input: String) -> String {
+        let hashed = SHA256.hash(data: Data(input.utf8))
+        return hashed.map { String(format: "%02x", $0) }.joined()
+    }
 }
 
 // MARK: - Response Types
 
-private struct InitiateResponse: Codable {
-    let auth_url: String
-    let state: String
-    let flow: String?
-}
-
-private struct PollCodeResponse: Codable {
-    let status: String
-    let code: String?
-}
-
-private struct TokenResponse: Codable {
+nonisolated private struct SupabaseSession: Codable, Sendable {
     let access_token: String
     let refresh_token: String
-    let user: AuthManager.User
+    let user: SupabaseUser?
 }
 
-private struct RefreshResponse: Codable {
-    let access_token: String
-    let expires_in: Int
+nonisolated private struct SupabaseUser: Codable, Sendable {
+    let id: String
+    let email: String?
+    let user_metadata: Metadata?
+
+    struct Metadata: Codable, Sendable {
+        let full_name: String?
+        let name: String?
+        let picture: String?
+        let avatar_url: String?
+    }
 }
 
-private struct ErrorResponse: Codable {
-    let error: String
+nonisolated private struct SupabaseError: Codable, Sendable {
+    let error: String?
+    let error_description: String?
+    let msg: String?
+    let message: String?
+
+    var displayMessage: String? {
+        error_description ?? msg ?? error
+    }
 }
 
 enum AuthError: LocalizedError {
     case noCode
     case invalidURL
     case serverError(statusCode: Int)
-    case popupTimeout
-    case cancelledByUser
+    case message(String)
 
     var errorDescription: String? {
         switch self {
-        case .noCode: return "No authorization code received"
+        case .noCode: return "No session returned"
         case .invalidURL: return "Invalid URL"
-        case .serverError(let code): return "Server error (\(code))"
-        case .popupTimeout: return "Sign-in timed out — please try again"
-        case .cancelledByUser: return "Sign-in cancelled by user"
+        case .serverError(let code): return "Sign in failed (\(code))"
+        case .message(let text): return text
         }
     }
 }

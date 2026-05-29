@@ -5,6 +5,7 @@ struct WelcomeView: View {
     @Environment(AuthManager.self) private var auth
 
     @State private var appear = false
+    @State private var showEmailAuth = false
 
     var body: some View {
         @Bindable var auth = auth
@@ -59,9 +60,17 @@ struct WelcomeView: View {
                     }
 
                     SignInWithAppleButton(.continue) { request in
-                        request.requestedScopes = [.email, .fullName]
-                    } onCompletion: { _ in
-                        Task { await auth.signIn(provider: "apple") }
+                        auth.prepareAppleRequest(request)
+                    } onCompletion: { result in
+                        switch result {
+                        case .success(let authorization):
+                            Task { await auth.signInWithApple(authorization) }
+                        case .failure(let error):
+                            if (error as? ASAuthorizationError)?.code != .canceled {
+                                auth.errorMessage = error.localizedDescription
+                                auth.showError = true
+                            }
+                        }
                     }
                     .signInWithAppleButtonStyle(.white)
                     .frame(height: 54)
@@ -69,12 +78,13 @@ struct WelcomeView: View {
                     .disabled(auth.isSigningIn)
 
                     Button {
-                        Task { await auth.signIn(provider: "google") }
+                        auth.notice = nil
+                        showEmailAuth = true
                     } label: {
                         HStack(spacing: 10) {
-                            Image(systemName: "g.circle.fill")
+                            Image(systemName: "envelope.fill")
                                 .font(.title3)
-                            Text("Continue with Google")
+                            Text("Continue with Email")
                                 .font(.headline)
                         }
                         .frame(maxWidth: .infinity)
@@ -104,6 +114,10 @@ struct WelcomeView: View {
             Button("OK") { }
         } message: {
             Text(auth.errorMessage)
+        }
+        .sheet(isPresented: $showEmailAuth) {
+            EmailAuthView()
+                .environment(auth)
         }
         .onAppear {
             withAnimation(.spring(response: 0.7, dampingFraction: 0.7)) {
