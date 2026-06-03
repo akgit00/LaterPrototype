@@ -1,19 +1,25 @@
 import SwiftUI
 
 struct TimeCapsuleView: View {
-    @State private var capsules: [TimeCapsule] = TimeCapsule.samples
+    @State private var capsules: [TimeCapsule] = []
     @State private var showCreateSheet: Bool = false
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                LazyVStack(spacing: 16) {
-                    ForEach(capsules) { capsule in
-                        TimeCapsuleCard(capsule: capsule)
+            Group {
+                if capsules.isEmpty {
+                    CapsuleEmptyState(onCreate: { showCreateSheet = true })
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 16) {
+                            ForEach(capsules) { capsule in
+                                TimeCapsuleCard(capsule: capsule)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 8)
                     }
                 }
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
             }
             .navigationTitle("Time Capsules")
             .toolbar {
@@ -29,6 +35,55 @@ struct TimeCapsuleView: View {
             .sheet(isPresented: $showCreateSheet) {
                 CreateCapsuleSheet()
                     .presentationDetents([.medium, .large])
+            }
+        }
+    }
+}
+
+struct CapsuleEmptyState: View {
+    let onCreate: () -> Void
+    @State private var pulse: Bool = false
+
+    var body: some View {
+        VStack(spacing: 20) {
+            ZStack {
+                Circle()
+                    .fill(.blue.opacity(0.12))
+                    .frame(width: 120, height: 120)
+                    .scaleEffect(pulse ? 1.1 : 0.95)
+                Image(systemName: "envelope.badge.shield.half.filled")
+                    .font(.system(size: 48))
+                    .foregroundStyle(.blue)
+                    .symbolRenderingMode(.hierarchical)
+            }
+
+            VStack(spacing: 8) {
+                Text("No capsules yet")
+                    .font(.title2.weight(.bold))
+                Text("Seal a message to your future self or a friend. We'll keep it locked until the day you choose.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+            }
+
+            Button {
+                onCreate()
+            } label: {
+                Label("Create your first capsule", systemImage: "plus.circle.fill")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 14)
+                    .background(.blue, in: Capsule())
+            }
+            .padding(.top, 4)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.8).repeatForever(autoreverses: true)) {
+                pulse = true
             }
         }
     }
@@ -53,29 +108,6 @@ nonisolated struct TimeCapsule: Identifiable, Sendable {
         self.isDelivered = isDelivered
     }
 
-    static let samples: [TimeCapsule] = [
-        TimeCapsule(
-            title: "Letter to Future Me",
-            message: "Remember how stressed you were about the move? Hope it all worked out...",
-            recipient: "Me",
-            deliveryDate: Calendar.current.date(byAdding: .month, value: 6, to: Date())!,
-            createdDate: Date()
-        ),
-        TimeCapsule(
-            title: "Birthday Surprise",
-            message: "Happy 25th! Here's what I wanted to tell you...",
-            recipient: "Sarah",
-            deliveryDate: Calendar.current.date(byAdding: .month, value: 3, to: Date())!,
-            createdDate: Calendar.current.date(byAdding: .day, value: -14, to: Date())!
-        ),
-        TimeCapsule(
-            title: "Graduation Memories",
-            message: "We did it! Class of 2025 forever.",
-            recipient: "The Crew",
-            deliveryDate: Calendar.current.date(byAdding: .year, value: 1, to: Date())!,
-            createdDate: Calendar.current.date(byAdding: .month, value: -2, to: Date())!
-        )
-    ]
 }
 
 struct TimeCapsuleCard: View {

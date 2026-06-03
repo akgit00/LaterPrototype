@@ -59,12 +59,69 @@ struct WorldMapView: View {
                 )
             }
         }
+        .overlay {
+            if viewModel.memories.isEmpty {
+                MapEmptyState(onCreate: { showCreateMemory = true })
+            }
+        }
         .fullScreenCover(item: $selectedMemoryID) { memoryID in
             MemoryRoomView(memoryID: memoryID, viewModel: viewModel)
         }
         .sheet(isPresented: $showCreateMemory) {
             CreateMemoryView(viewModel: viewModel)
                 .presentationDetents([.large])
+        }
+    }
+}
+
+struct MapEmptyState: View {
+    let onCreate: () -> Void
+    @State private var float: Bool = false
+
+    var body: some View {
+        VStack(spacing: 20) {
+            ZStack {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .frame(width: 110, height: 110)
+                Image(systemName: "mappin.and.ellipse")
+                    .font(.system(size: 44))
+                    .foregroundStyle(.white)
+                    .offset(y: float ? -4 : 4)
+            }
+            .shadow(color: .black.opacity(0.4), radius: 16, x: 0, y: 8)
+
+            VStack(spacing: 8) {
+                Text("Your map is empty")
+                    .font(.title2.weight(.bold))
+                    .foregroundStyle(.white)
+                Text("Pin your first memory to a place in the world and watch your globe come to life.")
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.85))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+            }
+
+            Button {
+                onCreate()
+            } label: {
+                Label("Create your first memory", systemImage: "plus.circle.fill")
+                    .font(.headline)
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 14)
+                    .background(.white, in: Capsule())
+            }
+            .padding(.top, 4)
+        }
+        .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.black.opacity(0.35))
+        .ignoresSafeArea()
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) {
+                float = true
+            }
         }
     }
 }

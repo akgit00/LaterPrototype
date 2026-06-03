@@ -8,12 +8,6 @@ nonisolated enum MemoryStore {
         return documents.appendingPathComponent("memories.json")
     }
 
-    /// Tracks whether the app has seeded its initial sample data.
-    static var hasSeeded: Bool {
-        get { UserDefaults.standard.bool(forKey: "hasSeededMemories") }
-        set { UserDefaults.standard.set(newValue, forKey: "hasSeededMemories") }
-    }
-
     /// Loads persisted memories from disk, or nil if none exist or decoding fails.
     static func load() -> [Memory]? {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
