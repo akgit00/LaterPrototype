@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct ContentView: View {
+    @Environment(AuthManager.self) private var auth
     @State private var viewModel = LaterViewModel()
     @State private var selectedTab: Int = 0
 
@@ -19,5 +20,10 @@ struct ContentView: View {
             }
         }
         .tint(.white)
+        .task(id: auth.user?.id) {
+            guard let user = auth.user else { return }
+            viewModel.configure(userID: user.id, email: user.email, displayName: user.name)
+            await viewModel.sync()
+        }
     }
 }

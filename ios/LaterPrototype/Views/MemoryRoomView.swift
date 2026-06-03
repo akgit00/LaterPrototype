@@ -136,6 +136,7 @@ struct MemoryRoomView: View {
 
                 Menu {
                     Button {
+                        showAddPeopleSheet = true
                     } label: {
                         Label("Share", systemImage: "square.and.arrow.up")
                     }
@@ -831,52 +832,124 @@ struct AddPeopleSheet: View {
     let viewModel: LaterViewModel
     @Environment(\.dismiss) private var dismiss
 
+    @State private var identifier: String = ""
+    @State private var isSharing = false
+    @State private var feedback: ShareFeedback?
+    @FocusState private var isFieldFocused: Bool
+
+    private struct ShareFeedback: Identifiable {
+        let id = UUID()
+        let message: String
+        let isError: Bool
+    }
+
     private var memory: Memory {
         viewModel.memoryByID(memoryID) ?? Memory(title: "", centerCoordinate: CLLocationCoordinate2D())
+    }
+
+    private var canShare: Bool {
+        identifier.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2 && !isSharing
     }
 
     var body: some View {
         NavigationStack {
             List {
-                ForEach(viewModel.allConnections) { connection in
-                    let isAdded = memory.connections.contains(where: { $0.id == connection.id })
+                Section {
+                    HStack(spacing: 10) {
+                        Image(systemName: "at")
+                            .foregroundStyle(.secondary)
+                        TextField("username or email", text: $identifier)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.emailAddress)
+                            .focused($isFieldFocused)
+                            .onSubmit { share() }
 
-                    Button {
-                        if isAdded {
-                            viewModel.removeConnection(from: memoryID, connection: connection)
+                        if isSharing {
+                            ProgressView()
                         } else {
-                            viewModel.addConnection(to: memoryID, connection: connection)
-                        }
-                    } label: {
-                        HStack(spacing: 12) {
-                            ConnectionAvatarView(connection: connection, size: 40)
-
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(connection.displayName)
-                                    .font(.subheadline.weight(.medium))
-                                    .foregroundStyle(.primary)
-                                Text("@\(connection.username)")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                            Button(action: share) {
+                                Image(systemName: "paperplane.fill")
+                                    .font(.body.weight(.semibold))
                             }
+                            .buttonStyle(.borderless)
+                            .disabled(!canShare)
+                        }
+                    }
+                    if let feedback {
+                        Label(feedback.message, systemImage: feedback.isError ? "exclamationmark.circle" : "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(feedback.isError ? .red : .green)
+                    }
+                } header: {
+                    Text("Share with a friend")
+                } footer: {
+                    Text("They'll see this memory in their Explore map and timeline once they sign in.")
+                }
 
-                            Spacer()
-
-                            Image(systemName: isAdded ? "checkmark.circle.fill" : "plus.circle")
-                                .font(.title3)
-                                .foregroundStyle(isAdded ? .green : .blue)
-                                .symbolEffect(.bounce, value: isAdded)
+                Section("Shared with") {
+                    if memory.connections.isEmpty {
+                        Text("Not shared yet")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(memory.connections) { connection in
+                            HStack(spacing: 12) {
+                                ConnectionAvatarView(connection: connection, size: 40)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(connection.displayName)
+                                        .font(.subheadline.weight(.medium))
+                                    Text("@\(connection.username)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button {
+                                    viewModel.removeConnection(from: memoryID, connection: connection)
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.title3)
+                                        .symbolRenderingMode(.hierarchical)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.borderless)
+                            }
                         }
                     }
                 }
             }
-            .navigationTitle("Add People")
+            .navigationTitle("Share")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                         .fontWeight(.semibold)
                 }
+            }
+        }
+    }
+
+    private func share() {
+        let query = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard query.count >= 2, !isSharing else { return }
+        isSharing = true
+        feedback = nil
+        isFieldFocused = false
+        Task {
+            let result = await viewModel.shareMemory(memoryID: memoryID, identifier: query)
+            isSharing = false
+            switch result {
+            case let .shared(name):
+                feedback = ShareFeedback(message: "Shared with \(name)", isError: false)
+                identifier = ""
+            case .notFound:
+                feedback = ShareFeedback(message: "No one found with that username or email", isError: true)
+            case .alreadyShared:
+                feedback = ShareFeedback(message: "Already shared with them", isError: true)
+            case .selfShare:
+                feedback = ShareFeedback(message: "That's you!", isError: true)
+            case let .failure(message):
+                feedback = ShareFeedback(message: message, isError: true)
             }
         }
     }
