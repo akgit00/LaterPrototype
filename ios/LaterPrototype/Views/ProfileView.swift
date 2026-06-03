@@ -8,6 +8,7 @@ struct ProfileView: View {
     @State private var selectedSegment: ProfileSegment = .timeline
     @State private var showSignOutConfirm = false
     @State private var showEditProfile = false
+    @State private var selectedMemoryID: UUID?
 
     private static let defaultBio = "Collecting moments across time & space"
 
@@ -106,6 +107,9 @@ struct ProfileView: View {
                     fallbackInitial: initial,
                     authPicture: auth.user?.picture
                 )
+            }
+            .fullScreenCover(item: $selectedMemoryID) { memoryID in
+                MemoryRoomView(memoryID: memoryID, viewModel: viewModel)
             }
         }
     }
@@ -221,31 +225,38 @@ struct ProfileView: View {
                 .padding(.vertical, 40)
             } else {
                 ForEach(viewModel.memories) { memory in
-                    HStack(spacing: 12) {
-                        Text(shortDate(memory.date))
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 50, alignment: .trailing)
-
-                        Circle()
-                            .fill(.blue)
-                            .frame(width: 10, height: 10)
-
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(memory.title)
-                                .font(.subheadline.weight(.semibold))
-                            Text("\(memory.connections.count) friends, \(memory.photoURLs.count) photos")
-                                .font(.caption)
+                    Button {
+                        selectedMemoryID = memory.id
+                    } label: {
+                        HStack(spacing: 12) {
+                            Text(shortDate(memory.date))
+                                .font(.caption.weight(.semibold))
                                 .foregroundStyle(.secondary)
+                                .frame(width: 50, alignment: .trailing)
+
+                            Circle()
+                                .fill(.blue)
+                                .frame(width: 10, height: 10)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(memory.title)
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.primary)
+                                Text("\(memory.connections.count) friends, \(memory.photoURLs.count) photos")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer()
+
+                            Image(systemName: "chevron.right")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
                         }
-
-                        Spacer()
-
-                        Image(systemName: "chevron.right")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
+                        .contentShape(.rect)
+                        .padding(.horizontal, 16)
                     }
-                    .padding(.horizontal, 16)
+                    .buttonStyle(.plain)
                 }
             }
         }
