@@ -6,6 +6,11 @@ nonisolated struct CloudProfile: Codable, Sendable, Identifiable {
     let username: String
     let display_name: String?
     let email: String?
+
+    /// Minimal projection used for existence checks (selects only `id`).
+    nonisolated struct Stub: Codable, Sendable {
+        let id: String
+    }
 }
 
 /// A memory row as stored in Supabase: the encoded `Memory` plus its owner.
@@ -39,15 +44,20 @@ nonisolated enum CloudMemoryService {
 
     // MARK: - Profiles
 
-    /// Ensures the signed-in user has a profile row so friends can find them.
+    /// Ensures the signed-in user has a profile row so friends can find them,
+    /// assigning a globally unique username. The `profiles.username` column has
+    /// a unique constraint, so a collision surfaces as an HTTP 409; we keep
+    /// generating fresh candidates until one is accepted.
     static func ensureProfile(userID: String, email: String, displayName: String?) async {
         if let existing = try? await fetchProfile(id: userID), existing != nil { return }
 
         let base = usernameBase(from: email, fallback: userID)
-        let candidates = [base, "\(base)_\(String(userID.replacingOccurrences(of: "-", with: "").prefix(4)))"]
         let name = displayName?.isEmpty == false ? displayName! : base
 
-        for candidate in candidates {
+        for candidate in usernameCandidates(base: base) {
+            // Skip names we can already see are taken to reduce wasted inserts.
+            if (try? await isUsernameTaken(candidate)) == true { continue }
+
             let row = ProfileUpsert(id: userID, username: candidate, email: email.lowercased(), display_name: name)
             guard let body = try? SupabaseREST.makeEncoder().encode(row) else { continue }
             do {
@@ -58,10 +68,40 @@ nonisolated enum CloudMemoryService {
                     prefer: "return=minimal"
                 )
                 return
+            } catch let SupabaseREST.RESTError.http(status, _) where status == 409 {
+                // Username (or profile) taken between our check and insert — try the next candidate.
+                continue
             } catch {
                 continue
             }
         }
+    }
+
+    /// Returns true if a profile already uses the given username (case-insensitive).
+    static func isUsernameTaken(_ username: String) async throws -> Bool {
+        let normalized = username.lowercased()
+        let data = try await SupabaseREST.request(
+            path: "profiles",
+            method: "GET",
+            query: [
+                URLQueryItem(name: "username", value: "eq.\(normalized)"),
+                URLQueryItem(name: "select", value: "id"),
+                URLQueryItem(name: "limit", value: "1"),
+            ]
+        )
+        return try !SupabaseREST.makeDecoder().decode([CloudProfile.Stub].self, from: data).isEmpty
+    }
+
+    /// An ordered, effectively-infinite sequence of unique-ish username
+    /// candidates: the clean base first, then numbered, then random suffixes.
+    private static func usernameCandidates(base: String) -> [String] {
+        var candidates = [base]
+        for n in 1...8 { candidates.append("\(base)\(n)") }
+        for _ in 0..<16 {
+            let suffix = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(6)).lowercased()
+            candidates.append("\(base)_\(suffix)")
+        }
+        return candidates
     }
 
     static func fetchProfile(id: String) async throws -> CloudProfile? {

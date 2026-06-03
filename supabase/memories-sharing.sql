@@ -19,6 +19,11 @@ create table if not exists public.profiles (
 
 alter table public.profiles enable row level security;
 
+-- Enforce globally unique usernames, case-insensitively ("John" == "john").
+-- The inline `unique` above covers exact case; this index closes the case gap.
+create unique index if not exists profiles_username_lower_key
+    on public.profiles (lower(username));
+
 -- Any signed-in user can look up profiles (so friends can be found by name/email).
 drop policy if exists "profiles readable by authenticated" on public.profiles;
 create policy "profiles readable by authenticated"
