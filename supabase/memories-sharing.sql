@@ -1,12 +1,3 @@
--- ============================================================================
--- Later — cloud memories + friend sharing
--- Run this once in your Supabase project:
---   Dashboard → SQL Editor → New query → paste → Run
---
--- Safe to re-run: everything uses IF NOT EXISTS / CREATE OR REPLACE.
--- Uses native Supabase Auth (auth.uid()), matching how the app signs in.
--- ============================================================================
-
 -- 1. Profiles -----------------------------------------------------------------
 create table if not exists public.profiles (
     id           uuid primary key references auth.users (id) on delete cascade,
