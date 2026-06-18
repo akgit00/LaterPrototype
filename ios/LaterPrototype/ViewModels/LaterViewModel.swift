@@ -13,6 +13,11 @@ final class LaterViewModel {
 
     var allConnections: [Connection] = []
 
+    /// Connection (friends) state.
+    var incomingRequests: [FriendRequest] = []
+    var outgoingRequests: [FriendRequest] = []
+    var isLoadingConnections = false
+
     /// Sync / cloud state.
     var isSyncing = false
     var syncError: String?
@@ -38,6 +43,23 @@ final class LaterViewModel {
         case notFound
         case alreadyShared
         case selfShare
+        case failure(String)
+    }
+
+    /// A pending connection request paired with the other person's identity.
+    struct FriendRequest: Identifiable {
+        let rowID: UUID
+        let connection: Connection
+        var id: UUID { rowID }
+    }
+
+    /// Outcome of attempting to send a connection request.
+    enum ConnectionRequestResult {
+        case sent(displayName: String)
+        case notFound
+        case alreadyConnected
+        case requestPending
+        case selfRequest
         case failure(String)
     }
 
@@ -79,6 +101,7 @@ final class LaterViewModel {
         defer { isSyncing = false }
 
         await CloudMemoryService.ensureProfile(userID: userID, email: currentEmail, displayName: currentDisplayName)
+        await loadConnections()
 
         // Migrate / push local memories (all locally-created memories are mine).
         for memory in memories {
@@ -280,6 +303,117 @@ final class LaterViewModel {
         } catch {
             return .failure(error.localizedDescription)
         }
+    }
+
+    // MARK: - Connections (friends)
+
+    /// Loads all connection rows and resolves them into friends + pending requests.
+    @MainActor
+    func loadConnections() async {
+        guard let userID = currentUserID, SupabaseREST.hasSession else { return }
+        isLoadingConnections = true
+        defer { isLoadingConnections = false }
+
+        do {
+            let rows = try await ConnectionService.fetchConnections()
+            let otherIDs = Array(Set(rows.map { $0.otherID(currentUserID: userID) }))
+            let profiles = try await ConnectionService.profiles(ids: otherIDs)
+            let profileByID = Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0) })
+
+            var friends: [Connection] = []
+            var incoming: [FriendRequest] = []
+            var outgoing: [FriendRequest] = []
+
+            for row in rows {
+                let otherID = row.otherID(currentUserID: userID)
+                guard let profile = profileByID[otherID],
+                      let otherUUID = UUID(uuidString: profile.id) else { continue }
+                let name = profile.display_name?.isEmpty == false ? profile.display_name! : profile.username
+                let connection = Connection(
+                    id: otherUUID,
+                    username: profile.username,
+                    displayName: name,
+                    avatarColor: Self.color(for: profile.id)
+                )
+                if row.status == "accepted" {
+                    friends.append(connection)
+                } else if row.addressee_id == userID {
+                    incoming.append(FriendRequest(rowID: row.id, connection: connection))
+                } else {
+                    outgoing.append(FriendRequest(rowID: row.id, connection: connection))
+                }
+            }
+
+            allConnections = friends.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+            incomingRequests = incoming
+            outgoingRequests = outgoing
+        } catch {
+            syncError = error.localizedDescription
+        }
+    }
+
+    /// Sends a connection request to someone looked up by `@username` or email.
+    @MainActor
+    func sendConnectionRequest(identifier: String) async -> ConnectionRequestResult {
+        guard let userID = currentUserID, SupabaseREST.hasSession else {
+            return .failure("You need to be signed in to add connections.")
+        }
+        do {
+            guard let profile = try await CloudMemoryService.findProfile(identifier: identifier) else {
+                return .notFound
+            }
+            if profile.id == userID { return .selfRequest }
+            guard let otherUUID = UUID(uuidString: profile.id) else {
+                return .failure("Couldn't read that account.")
+            }
+
+            if allConnections.contains(where: { $0.id == otherUUID }) {
+                return .alreadyConnected
+            }
+            if incomingRequests.contains(where: { $0.connection.id == otherUUID })
+                || outgoingRequests.contains(where: { $0.connection.id == otherUUID }) {
+                return .requestPending
+            }
+
+            try await ConnectionService.sendRequest(from: userID, to: profile.id)
+            await loadConnections()
+            let name = profile.display_name?.isEmpty == false ? profile.display_name! : profile.username
+            return .sent(displayName: name)
+        } catch let SupabaseREST.RESTError.http(status, _) where status == 409 {
+            return .requestPending
+        } catch {
+            return .failure(error.localizedDescription)
+        }
+    }
+
+    /// Accepts an incoming connection request.
+    @MainActor
+    func acceptRequest(_ request: FriendRequest) async {
+        do {
+            try await ConnectionService.accept(id: request.rowID)
+            await loadConnections()
+        } catch {
+            syncError = error.localizedDescription
+        }
+    }
+
+    /// Declines an incoming request or cancels an outgoing one.
+    @MainActor
+    func removeRequest(_ request: FriendRequest) async {
+        do {
+            try await ConnectionService.remove(id: request.rowID)
+            await loadConnections()
+        } catch {
+            syncError = error.localizedDescription
+        }
+    }
+
+    /// Deterministically assigns an avatar color from a user id so the same
+    /// friend always shows the same color across sessions and devices.
+    private static func color(for id: String) -> ConnectionColor {
+        let colors = ConnectionColor.allCases
+        let hash = abs(id.hashValue)
+        return colors[hash % colors.count]
     }
 
     // MARK: - Lookups

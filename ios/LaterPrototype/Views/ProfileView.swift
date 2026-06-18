@@ -8,6 +8,7 @@ struct ProfileView: View {
     @State private var selectedSegment: ProfileSegment = .timeline
     @State private var showSignOutConfirm = false
     @State private var showEditProfile = false
+    @State private var showAddConnection = false
     @State private var selectedMemoryID: UUID?
 
     private static let defaultBio = "Collecting moments across time & space"
@@ -75,6 +76,15 @@ struct ProfileView: View {
             }
             .navigationTitle("Profile")
             .toolbar {
+                if selectedSegment == .connections {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button {
+                            showAddConnection = true
+                        } label: {
+                            Image(systemName: "person.badge.plus")
+                        }
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button {
@@ -98,6 +108,9 @@ struct ProfileView: View {
                     Task { await auth.signOut() }
                 }
                 Button("Cancel", role: .cancel) { }
+            }
+            .sheet(isPresented: $showAddConnection) {
+                AddConnectionView(viewModel: viewModel)
             }
             .sheet(isPresented: $showEditProfile) {
                 EditProfileView(
@@ -264,7 +277,93 @@ struct ProfileView: View {
     }
 
     private var connectionsContent: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 16) {
+            if !viewModel.incomingRequests.isEmpty {
+                requestsSection
+            }
+            if !viewModel.outgoingRequests.isEmpty {
+                outgoingSection
+            }
+            friendsSection
+        }
+        .padding(.bottom, 32)
+    }
+
+    private var requestsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader("Requests", count: viewModel.incomingRequests.count)
+
+            ForEach(viewModel.incomingRequests) { request in
+                HStack(spacing: 12) {
+                    ConnectionAvatarView(connection: request.connection, size: 40)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(request.connection.displayName)
+                            .font(.subheadline.weight(.semibold))
+                        Text("@\(request.connection.username)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    Button {
+                        Task { await viewModel.acceptRequest(request) }
+                    } label: {
+                        Image(systemName: "checkmark")
+                            .font(.subheadline.weight(.bold))
+                            .frame(width: 34, height: 34)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .clipShape(.circle)
+
+                    Button {
+                        Task { await viewModel.removeRequest(request) }
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.subheadline.weight(.bold))
+                            .frame(width: 34, height: 34)
+                    }
+                    .buttonStyle(.bordered)
+                    .clipShape(.circle)
+                }
+                .padding(.horizontal, 16)
+            }
+        }
+    }
+
+    private var outgoingSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader("Pending", count: viewModel.outgoingRequests.count)
+
+            ForEach(viewModel.outgoingRequests) { request in
+                HStack(spacing: 12) {
+                    ConnectionAvatarView(connection: request.connection, size: 40)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(request.connection.displayName)
+                            .font(.subheadline.weight(.semibold))
+                        Text("Request sent")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    Button("Cancel") {
+                        Task { await viewModel.removeRequest(request) }
+                    }
+                    .font(.caption.weight(.semibold))
+                    .buttonStyle(.bordered)
+                    .clipShape(.capsule)
+                }
+                .padding(.horizontal, 16)
+            }
+        }
+    }
+
+    private var friendsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
             if viewModel.allConnections.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "person.2.slash")
@@ -273,10 +372,21 @@ struct ProfileView: View {
                     Text("No connections yet")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                    Button {
+                        showAddConnection = true
+                    } label: {
+                        Label("Add a connection", systemImage: "person.badge.plus")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .clipShape(.capsule)
+                    .padding(.top, 4)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 40)
             } else {
+                sectionHeader("Connections", count: viewModel.allConnections.count)
+
                 ForEach(viewModel.allConnections) { connection in
                     let sharedCount = viewModel.memories.filter { $0.connections.contains(where: { $0.id == connection.id }) }.count
 
@@ -301,7 +411,22 @@ struct ProfileView: View {
                 }
             }
         }
-        .padding(.bottom, 32)
+    }
+
+    private func sectionHeader(_ title: String, count: Int) -> some View {
+        HStack {
+            Text(title.uppercased())
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.secondary)
+            Text("\(count)")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
+                .background(Color(.tertiarySystemBackground), in: .capsule)
+            Spacer()
+        }
+        .padding(.horizontal, 16)
     }
 
     private var legacyContent: some View {
