@@ -129,6 +129,7 @@ final class LaterViewModel {
             persist()
             await loadComments()
             await loadMedia()
+            await loadPlaylists()
         } catch {
             syncError = error.localizedDescription
         }
@@ -192,6 +193,28 @@ final class LaterViewModel {
                     Comment(id: $0.id, username: $0.username, text: $0.text, date: $0.created_at)
                 }
                 memories[index].comments = comments
+            }
+            persist()
+        } catch {
+            syncError = error.localizedDescription
+        }
+    }
+
+    /// Pulls the linked playlist for every visible memory from the dedicated
+    /// playlists table and merges it in, so the owner and shared connections all
+    /// see the same playlist — no matter who linked it.
+    @MainActor
+    private func loadPlaylists() async {
+        guard SupabaseREST.hasSession else { return }
+        let ids = memories.map { $0.id }
+        guard !ids.isEmpty else { return }
+        do {
+            let rows = try await PlaylistService.fetch(memoryIDs: ids)
+            let byMemory = Dictionary(rows.map { ($0.memory_id, $0.payload) }, uniquingKeysWith: { first, _ in first })
+            for index in memories.indices {
+                if let playlist = byMemory[memories[index].id] {
+                    memories[index].playlist = playlist
+                }
             }
             persist()
         } catch {
@@ -390,11 +413,28 @@ final class LaterViewModel {
         if isOwned(memoryID) { await pushMemory(memoryID) }
     }
 
+    /// Links a playlist to a memory. Works for the owner and any connection the
+    /// memory is shared with: the playlist is stored in the dedicated playlists
+    /// table so everyone on the memory sees it.
     func setPlaylist(for memoryID: UUID, playlist: PlaylistAttachment) {
         guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
         memories[index].playlist = playlist
         persist()
-        Task { await pushMemory(memoryID) }
+        Task {
+            try? await PlaylistService.upsert(memoryID: memoryID, playlist: playlist)
+            if isOwned(memoryID) { await pushMemory(memoryID) }
+        }
+    }
+
+    /// Removes the linked playlist from a memory for everyone on it.
+    func removePlaylist(from memoryID: UUID) {
+        guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        memories[index].playlist = nil
+        persist()
+        Task {
+            try? await PlaylistService.remove(memoryID: memoryID)
+            if isOwned(memoryID) { await pushMemory(memoryID) }
+        }
     }
 
     func addConnection(to memoryID: UUID, connection: Connection) {

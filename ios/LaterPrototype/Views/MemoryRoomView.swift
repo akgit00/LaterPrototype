@@ -549,6 +549,18 @@ struct MemoryMediaSheet: View {
                     }
                 }
                 .padding(.horizontal, 20)
+                .contextMenu {
+                    Button {
+                        onAddPlaylist()
+                    } label: {
+                        Label("Change Playlist", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    Button(role: .destructive) {
+                        viewModel.removePlaylist(from: memoryID)
+                    } label: {
+                        Label("Remove Playlist", systemImage: "trash")
+                    }
+                }
 
                 Divider()
                     .padding(.horizontal, 20)
