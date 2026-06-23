@@ -793,7 +793,7 @@ struct CommentInputView: View {
                 )
                 .frame(width: 32, height: 32)
                 .overlay {
-                    Text("S")
+                    Text(String((viewModel.currentUsername ?? "You").prefix(1)).uppercased())
                         .font(.system(size: 14, weight: .bold))
                         .foregroundStyle(.white)
                 }
@@ -806,13 +806,10 @@ struct CommentInputView: View {
 
                 if !commentText.isEmpty {
                     Button {
-                        let comment = Comment(
-                            username: "Samantherr",
-                            text: commentText
-                        )
-                        viewModel.addComment(to: memoryID, comment: comment)
+                        let text = commentText
                         commentText = ""
                         isFocused = false
+                        Task { await viewModel.addComment(to: memoryID, text: text) }
                     } label: {
                         Image(systemName: "arrow.up.circle.fill")
                             .font(.title2)

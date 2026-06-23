@@ -24,6 +24,8 @@ final class LaterViewModel {
 
     /// The signed-in user's id; nil when offline / unauthenticated.
     private(set) var currentUserID: String?
+    /// The signed-in user's @username, resolved from their cloud profile.
+    private(set) var currentUsername: String?
     private var currentEmail: String = ""
     private var currentDisplayName: String?
     /// Memory ids owned by the current user (vs shared with them by friends).
@@ -101,6 +103,9 @@ final class LaterViewModel {
         defer { isSyncing = false }
 
         await CloudMemoryService.ensureProfile(userID: userID, email: currentEmail, displayName: currentDisplayName)
+        if let profile = try? await CloudMemoryService.fetchProfile(id: userID) {
+            currentUsername = profile.username
+        }
         await loadConnections()
 
         // Migrate / push local memories (all locally-created memories are mine).
@@ -121,6 +126,30 @@ final class LaterViewModel {
                 .map { $0.payload }
                 .sorted { $0.date > $1.date }
             rebuildGlobalPins()
+            persist()
+            await loadComments()
+        } catch {
+            syncError = error.localizedDescription
+        }
+    }
+
+    /// Pulls comments for every visible memory from the dedicated comments
+    /// table and merges them in, so the owner and shared connections all see
+    /// the same conversation.
+    @MainActor
+    private func loadComments() async {
+        guard SupabaseREST.hasSession else { return }
+        let ids = memories.map { $0.id }
+        guard !ids.isEmpty else { return }
+        do {
+            let rows = try await CommentService.fetch(memoryIDs: ids)
+            let grouped = Dictionary(grouping: rows, by: { $0.memory_id })
+            for index in memories.indices {
+                let comments = (grouped[memories[index].id] ?? []).map {
+                    Comment(id: $0.id, username: $0.username, text: $0.text, date: $0.created_at)
+                }
+                memories[index].comments = comments
+            }
             persist()
         } catch {
             syncError = error.localizedDescription
@@ -213,11 +242,43 @@ final class LaterViewModel {
         Task { await pushMemory(memoryID) }
     }
 
-    func addComment(to memoryID: UUID, comment: Comment) {
+    /// Adds a comment to a memory. Works for the owner and any connection the
+    /// memory is shared with; the comment is stored in the dedicated comments
+    /// table so everyone on the memory sees it.
+    @MainActor
+    func addComment(to memoryID: UUID, text: String) async {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
         guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
-        memories[index].comments.append(comment)
+
+        let name = currentUsername ?? "You"
+        // Optimistically show the comment immediately.
+        let local = Comment(username: name, text: trimmed)
+        memories[index].comments.append(local)
         persist()
-        Task { await pushMemory(memoryID) }
+
+        guard SupabaseREST.hasSession else { return }
+        do {
+            if let row = try await CommentService.post(memoryID: memoryID, username: name, text: trimmed),
+               let memoryIndex = memories.firstIndex(where: { $0.id == memoryID }),
+               let commentIndex = memories[memoryIndex].comments.firstIndex(where: { $0.id == local.id }) {
+                // Replace the optimistic comment with the server-stored one.
+                memories[memoryIndex].comments[commentIndex] = Comment(
+                    id: row.id,
+                    username: row.username,
+                    text: row.text,
+                    date: row.created_at
+                )
+                persist()
+            }
+        } catch {
+            // Roll back the optimistic comment if the server rejected it.
+            if let memoryIndex = memories.firstIndex(where: { $0.id == memoryID }) {
+                memories[memoryIndex].comments.removeAll { $0.id == local.id }
+                persist()
+            }
+            syncError = error.localizedDescription
+        }
     }
 
     func addPhotoURL(to memoryID: UUID, url: String) {
