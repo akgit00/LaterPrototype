@@ -408,6 +408,47 @@ final class LaterViewModel {
         }
     }
 
+    // MARK: - Messaging
+
+    /// A direct message resolved for display in a conversation.
+    struct ChatBubble: Identifiable {
+        let id: UUID
+        let body: String
+        let isMine: Bool
+        let date: Date
+    }
+
+    /// Loads the conversation between the signed-in user and a connection,
+    /// oldest message first.
+    @MainActor
+    func loadConversation(with friend: Connection) async -> [ChatBubble] {
+        guard let userID = currentUserID, SupabaseREST.hasSession else { return [] }
+        do {
+            let rows = try await MessageService.conversation(with: friend.id.uuidString, currentUserID: userID)
+            return rows.map { row in
+                ChatBubble(id: row.id, body: row.body, isMine: row.isMine(currentUserID: userID), date: row.created_at)
+            }
+        } catch {
+            syncError = error.localizedDescription
+            return []
+        }
+    }
+
+    /// Sends a message to a connection and returns the stored bubble on success.
+    @MainActor
+    func sendMessage(to friend: Connection, body: String) async -> ChatBubble? {
+        guard let userID = currentUserID, SupabaseREST.hasSession else { return nil }
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        do {
+            guard let row = try await MessageService.send(to: friend.id.uuidString, body: trimmed) else { return nil }
+            return ChatBubble(id: row.id, body: row.body, isMine: row.isMine(currentUserID: userID), date: row.created_at)
+        } catch {
+            syncError = error.localizedDescription
+            return nil
+        }
+    }
+
     /// Deterministically assigns an avatar color from a user id so the same
     /// friend always shows the same color across sessions and devices.
     private static func color(for id: String) -> ConnectionColor {

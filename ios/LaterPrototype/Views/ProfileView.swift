@@ -10,6 +10,7 @@ struct ProfileView: View {
     @State private var showEditProfile = false
     @State private var showAddConnection = false
     @State private var selectedMemoryID: UUID?
+    @State private var chatFriend: Connection?
 
     private static let defaultBio = "Collecting moments across time & space"
 
@@ -111,6 +112,9 @@ struct ProfileView: View {
             }
             .sheet(isPresented: $showAddConnection) {
                 AddConnectionView(viewModel: viewModel)
+            }
+            .sheet(item: $chatFriend) { friend in
+                ChatView(viewModel: viewModel, friend: friend)
             }
             .sheet(isPresented: $showEditProfile) {
                 EditProfileView(
@@ -390,24 +394,31 @@ struct ProfileView: View {
                 ForEach(viewModel.allConnections) { connection in
                     let sharedCount = viewModel.memories.filter { $0.connections.contains(where: { $0.id == connection.id }) }.count
 
-                    HStack(spacing: 12) {
-                        ConnectionAvatarView(connection: connection, size: 40)
+                    Button {
+                        chatFriend = connection
+                    } label: {
+                        HStack(spacing: 12) {
+                            ConnectionAvatarView(connection: connection, size: 40)
 
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(connection.displayName)
-                                .font(.subheadline.weight(.semibold))
-                            Text("\(sharedCount) shared memor\(sharedCount == 1 ? "y" : "ies")")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(connection.displayName)
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.primary)
+                                Text("\(sharedCount) shared memor\(sharedCount == 1 ? "y" : "ies")")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer()
+
+                            Image(systemName: "message.fill")
+                                .font(.body)
+                                .foregroundStyle(.blue)
                         }
-
-                        Spacer()
-
-                        Image(systemName: "message.fill")
-                            .font(.body)
-                            .foregroundStyle(.blue)
+                        .contentShape(.rect)
+                        .padding(.horizontal, 16)
                     }
-                    .padding(.horizontal, 16)
+                    .buttonStyle(.plain)
                 }
             }
         }
