@@ -65,20 +65,14 @@ struct MemoryRoomView: View {
             MemoryMediaSheet(
                 memoryID: memoryID,
                 viewModel: viewModel,
-                onPhotoTap: { index in
-                    selectedPhotoIndex = index
-                    showPhotoViewer = true
-                },
+                selectedPhotoIndex: $selectedPhotoIndex,
+                showPhotoViewer: $showPhotoViewer,
+                playingVideoURL: $playingVideoURL,
                 onAddPlaylist: {
                     showAddPlaylistSheet = true
                 },
                 onAddPeople: {
                     showAddPeopleSheet = true
-                },
-                onVideoTap: { video in
-                    if let urlString = video.videoURL, let url = URL(string: urlString) {
-                        playingVideoURL = url
-                    }
                 }
             )
             .presentationDetents([.fraction(0.15), .fraction(0.45), .large], selection: $selectedDetent)
@@ -87,14 +81,6 @@ struct MemoryRoomView: View {
             .presentationCornerRadius(24)
             .presentationContentInteraction(.scrolls)
             .interactiveDismissDisabled()
-        }
-        .sheet(isPresented: $showPhotoViewer) {
-            if let index = selectedPhotoIndex {
-                PhotoViewerSheet(photoURLs: memory.photoURLs, initialIndex: index)
-            }
-        }
-        .fullScreenCover(item: $playingVideoURL) { url in
-            VideoPlayerView(url: url)
         }
         .sheet(isPresented: $showAddPlaylistSheet) {
             AddPlaylistSheet(memoryID: memoryID, viewModel: viewModel)
@@ -191,10 +177,11 @@ struct MemoryRoomView: View {
 struct MemoryMediaSheet: View {
     let memoryID: UUID
     let viewModel: LaterViewModel
-    let onPhotoTap: (Int) -> Void
+    @Binding var selectedPhotoIndex: Int?
+    @Binding var showPhotoViewer: Bool
+    @Binding var playingVideoURL: URL?
     let onAddPlaylist: () -> Void
     let onAddPeople: () -> Void
-    let onVideoTap: (VideoAttachment) -> Void
 
     @State private var selectedSection: MediaSection = .photos
     @State private var showAddPhotosPicker: Bool = false
@@ -295,6 +282,14 @@ struct MemoryMediaSheet: View {
             selectedPhotosItems = []
             Task { await importPickedItems(captured) }
         }
+        .sheet(isPresented: $showPhotoViewer) {
+            if let index = selectedPhotoIndex {
+                PhotoViewerSheet(photoURLs: memory.photoURLs, initialIndex: index)
+            }
+        }
+        .fullScreenCover(item: $playingVideoURL) { url in
+            VideoPlayerView(url: url)
+        }
     }
 
     private func importPickedItems(_ items: [PhotosPickerItem]) async {
@@ -315,10 +310,10 @@ struct MemoryMediaSheet: View {
                     duration: duration,
                     videoURL: urlString
                 )
-                viewModel.addVideo(to: memoryID, video: video)
+                await viewModel.addVideo(to: memoryID, video: video)
             } else {
                 guard let urlString = MediaStore.saveImage(data) else { continue }
-                viewModel.addPhotoURL(to: memoryID, url: urlString)
+                await viewModel.addPhotoURL(to: memoryID, url: urlString)
             }
         }
     }
@@ -390,7 +385,8 @@ struct MemoryMediaSheet: View {
 
                 ForEach(Array(memory.photoURLs.enumerated()), id: \.offset) { index, url in
                     Button {
-                        onPhotoTap(index)
+                        selectedPhotoIndex = index
+                        showPhotoViewer = true
                     } label: {
                         Color(.secondarySystemBackground)
                             .aspectRatio(1, contentMode: .fill)
@@ -470,7 +466,9 @@ struct MemoryMediaSheet: View {
 
                         ForEach(memory.videos) { video in
                             Button {
-                                onVideoTap(video)
+                                if let urlString = video.videoURL, let url = URL(string: urlString) {
+                                    playingVideoURL = url
+                                }
                             } label: {
                                 VideoThumbnailCard(video: video)
                             }

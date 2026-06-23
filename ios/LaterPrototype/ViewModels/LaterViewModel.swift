@@ -128,6 +128,49 @@ final class LaterViewModel {
             rebuildGlobalPins()
             persist()
             await loadComments()
+            await loadMedia()
+        } catch {
+            syncError = error.localizedDescription
+        }
+    }
+
+    /// Pulls photos and videos for every visible memory from the dedicated
+    /// media table and merges them in, so the owner and shared connections all
+    /// see the same media — no matter who added it.
+    @MainActor
+    private func loadMedia() async {
+        guard SupabaseREST.hasSession else { return }
+        let ids = memories.map { $0.id }
+        guard !ids.isEmpty else { return }
+        do {
+            let rows = try await MediaService.fetch(memoryIDs: ids)
+            let grouped = Dictionary(grouping: rows, by: { $0.memory_id })
+            for index in memories.indices {
+                let mediaRows = grouped[memories[index].id] ?? []
+
+                var photos = memories[index].photoURLs
+                for row in mediaRows where row.kind == "photo" {
+                    if !photos.contains(row.url) { photos.append(row.url) }
+                }
+                memories[index].photoURLs = photos
+
+                var videos = memories[index].videos
+                for row in mediaRows where row.kind == "video" {
+                    if !videos.contains(where: { $0.id == row.id || $0.videoURL == row.url }) {
+                        videos.append(
+                            VideoAttachment(
+                                id: row.id,
+                                thumbnailURL: row.thumbnail_url ?? "",
+                                title: "Video",
+                                duration: row.duration ?? "",
+                                videoURL: row.url
+                            )
+                        )
+                    }
+                }
+                memories[index].videos = videos
+            }
+            persist()
         } catch {
             syncError = error.localizedDescription
         }
@@ -228,7 +271,10 @@ final class LaterViewModel {
         MediaStore.deleteFile(at: url)
         rebuildGlobalPins()
         persist()
-        Task { await pushMemory(memoryID) }
+        Task {
+            try? await MediaService.deletePhoto(memoryID: memoryID, url: url)
+            await pushMemory(memoryID)
+        }
     }
 
     func removeVideo(from memoryID: UUID, video: VideoAttachment) {
@@ -239,7 +285,10 @@ final class LaterViewModel {
         }
         MediaStore.deleteFile(at: video.thumbnailURL)
         persist()
-        Task { await pushMemory(memoryID) }
+        Task {
+            try? await MediaService.deleteVideo(id: video.id)
+            await pushMemory(memoryID)
+        }
     }
 
     /// Adds a comment to a memory. Works for the owner and any connection the
@@ -281,18 +330,64 @@ final class LaterViewModel {
         }
     }
 
-    func addPhotoURL(to memoryID: UUID, url: String) {
+    /// Adds a photo to a memory. Works for the owner and any connection the
+    /// memory is shared with: the file is uploaded to storage and recorded in
+    /// the dedicated media table so everyone on the memory sees it.
+    @MainActor
+    func addPhotoURL(to memoryID: UUID, url localURL: String) async {
         guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
-        memories[index].photoURLs.append(url)
+        // Show the local file immediately while it uploads.
+        memories[index].photoURLs.append(localURL)
         persist()
-        Task { await pushMemory(memoryID) }
+
+        guard let userID = currentUserID, SupabaseREST.hasSession else { return }
+        let publicURL = await CloudMemoryService.uploadIfLocal(localURL, userID: userID, memoryID: memoryID)
+        if let i = memories.firstIndex(where: { $0.id == memoryID }),
+           let p = memories[i].photoURLs.firstIndex(of: localURL) {
+            memories[i].photoURLs[p] = publicURL
+            persist()
+        }
+        try? await MediaService.postPhoto(memoryID: memoryID, url: publicURL)
+        if isOwned(memoryID) { await pushMemory(memoryID) }
     }
 
-    func addVideo(to memoryID: UUID, video: VideoAttachment) {
+    /// Adds a video to a memory. Works for the owner and any connection the
+    /// memory is shared with.
+    @MainActor
+    func addVideo(to memoryID: UUID, video: VideoAttachment) async {
         guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        // Show the local video immediately while it uploads.
         memories[index].videos.append(video)
         persist()
-        Task { await pushMemory(memoryID) }
+
+        guard let userID = currentUserID, SupabaseREST.hasSession else { return }
+        let thumb = await CloudMemoryService.uploadIfLocal(video.thumbnailURL, userID: userID, memoryID: memoryID)
+        var publicVideoURL: String?
+        if let original = video.videoURL {
+            publicVideoURL = await CloudMemoryService.uploadIfLocal(original, userID: userID, memoryID: memoryID)
+        }
+        let uploaded = VideoAttachment(
+            id: video.id,
+            thumbnailURL: thumb,
+            title: video.title,
+            duration: video.duration,
+            videoURL: publicVideoURL
+        )
+        if let i = memories.firstIndex(where: { $0.id == memoryID }),
+           let v = memories[i].videos.firstIndex(where: { $0.id == video.id }) {
+            memories[i].videos[v] = uploaded
+            persist()
+        }
+        if let publicVideoURL {
+            try? await MediaService.postVideo(
+                memoryID: memoryID,
+                id: video.id,
+                url: publicVideoURL,
+                thumbnailURL: thumb,
+                duration: video.duration
+            )
+        }
+        if isOwned(memoryID) { await pushMemory(memoryID) }
     }
 
     func setPlaylist(for memoryID: UUID, playlist: PlaylistAttachment) {
