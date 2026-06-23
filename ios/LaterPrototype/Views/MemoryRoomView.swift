@@ -1006,6 +1006,9 @@ struct AddPlaylistSheet: View {
     @State private var playlistURL: String = ""
     @State private var playlistName: String = ""
     @State private var selectedSource: PlaylistSource = .spotify
+    @State private var showSpotifyBrowse: Bool = false
+
+    private let spotifyGreen = Color(red: 0.11, green: 0.84, blue: 0.38)
 
     var body: some View {
         NavigationStack {
@@ -1015,6 +1018,28 @@ struct AddPlaylistSheet: View {
                     Text("Apple Music").tag(PlaylistSource.appleMusic)
                 }
                 .pickerStyle(.segmented)
+
+                if selectedSource == .spotify && SpotifyConfig.isConfigured {
+                    Button {
+                        showSpotifyBrowse = true
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "antenna.radiowaves.left.and.right")
+                            Text("Browse my Spotify playlists")
+                                .font(.body.weight(.semibold))
+                            Spacer()
+                            Image(systemName: "chevron.right").font(.caption.weight(.bold))
+                        }
+                        .padding(14)
+                        .frame(maxWidth: .infinity)
+                        .background(spotifyGreen, in: RoundedRectangle(cornerRadius: 14))
+                        .foregroundStyle(.white)
+                    }
+
+                    Text("Or paste a link manually below")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Playlist Name")
@@ -1073,6 +1098,11 @@ struct AddPlaylistSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                }
+            }
+            .sheet(isPresented: $showSpotifyBrowse) {
+                SpotifyBrowseView(memoryID: memoryID, viewModel: viewModel) {
+                    dismiss()
                 }
             }
         }
