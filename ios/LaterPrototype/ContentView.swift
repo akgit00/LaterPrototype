@@ -20,7 +20,7 @@ struct ContentView: View {
                 ProfileView(viewModel: viewModel)
             }
         }
-        .tint(.white)
+        .tint(.blue)
         .task(id: auth.user?.id) {
             guard let user = auth.user else { return }
             viewModel.configure(userID: user.id, email: user.email, displayName: user.name)
