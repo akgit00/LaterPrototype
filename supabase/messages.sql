@@ -17,6 +17,11 @@ create index if not exists messages_created_idx on public.messages (created_at);
 
 alter table public.messages enable row level security;
 
+-- Base table privileges. RLS controls WHICH rows a role can touch, but the role
+-- still needs table-level grants to touch the table at all. Without this you get
+-- "permission denied for table messages" (42501) even with correct policies.
+grant select, insert, delete on public.messages to authenticated;
+
 -- Either participant can read a message that involves them.
 drop policy if exists "read own messages" on public.messages;
 create policy "read own messages"
