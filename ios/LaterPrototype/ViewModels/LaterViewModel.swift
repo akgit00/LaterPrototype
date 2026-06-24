@@ -146,9 +146,21 @@ final class LaterViewModel {
         do {
             let rows = try await CloudMemoryService.fetchMemories()
             ownedMemoryIDs = Set(rows.filter { $0.owner_id == userID }.map { $0.id })
+            // Cloud payloads carry a stale/empty comments array (comments live in
+            // their own table). Carry over the comments we already have in memory
+            // so a poll never blanks a just-posted comment before loadComments runs.
+            let existingComments = Dictionary(
+                memories.map { ($0.id, $0.comments) },
+                uniquingKeysWith: { first, _ in first }
+            )
             memories = rows
                 .map { $0.payload }
                 .sorted { $0.date > $1.date }
+            for index in memories.indices {
+                if let carried = existingComments[memories[index].id] {
+                    memories[index].comments = carried
+                }
+            }
             rebuildGlobalPins()
             persist()
             await loadComments()
@@ -213,15 +225,23 @@ final class LaterViewModel {
             let rows = try await CommentService.fetch(memoryIDs: ids)
             let grouped = Dictionary(grouping: rows, by: { $0.memory_id })
             for index in memories.indices {
-                var comments = (grouped[memories[index].id] ?? []).map {
+                let memoryID = memories[index].id
+                var comments = (grouped[memoryID] ?? []).map {
                     Comment(id: $0.id, username: $0.username, text: $0.text, date: $0.created_at)
                 }
                 // Re-add any optimistic comments the server hasn't confirmed yet,
                 // so a poll mid-post never makes a fresh comment vanish.
-                if let pending = pendingComments[memories[index].id] {
+                if let pending = pendingComments[memoryID] {
                     for comment in pending where !comments.contains(where: { $0.id == comment.id }) {
                         comments.append(comment)
                     }
+                }
+                // Merge in any comment we already display that the server didn't
+                // return yet (eventual consistency right after posting), so a
+                // confirmed comment never flickers out between polls.
+                for comment in memories[index].comments
+                where !comments.contains(where: { $0.id == comment.id }) {
+                    comments.append(comment)
                 }
                 memories[index].comments = comments.sorted { $0.date < $1.date }
             }
