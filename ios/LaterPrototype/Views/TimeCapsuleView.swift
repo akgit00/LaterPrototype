@@ -3,6 +3,7 @@ import SwiftUI
 struct TimeCapsuleView: View {
     @State private var capsules: [TimeCapsule] = []
     @State private var showCreateSheet: Bool = false
+    @State private var openedCapsule: TimeCapsule?
 
     var body: some View {
         NavigationStack {
@@ -13,7 +14,14 @@ struct TimeCapsuleView: View {
                     ScrollView {
                         LazyVStack(spacing: 16) {
                             ForEach(capsules) { capsule in
-                                TimeCapsuleCard(capsule: capsule)
+                                Button {
+                                    if capsule.isDelivered {
+                                        openedCapsule = capsule
+                                    }
+                                } label: {
+                                    TimeCapsuleCard(capsule: capsule)
+                                }
+                                .buttonStyle(.plain)
                             }
                         }
                         .padding(.horizontal, 16)
@@ -33,8 +41,20 @@ struct TimeCapsuleView: View {
                 }
             }
             .sheet(isPresented: $showCreateSheet) {
-                CreateCapsuleSheet()
+                CreateCapsuleSheet { newCapsule in
+                    capsules.insert(newCapsule, at: 0)
+                    CapsuleStore.save(capsules)
+                }
+                .presentationDetents([.medium, .large])
+            }
+            .sheet(item: $openedCapsule) { capsule in
+                CapsuleDetailSheet(capsule: capsule)
                     .presentationDetents([.medium, .large])
+            }
+        }
+        .onAppear {
+            if let stored = CapsuleStore.load() {
+                capsules = stored
             }
         }
     }
@@ -89,23 +109,26 @@ struct CapsuleEmptyState: View {
     }
 }
 
-nonisolated struct TimeCapsule: Identifiable, Sendable {
+nonisolated struct TimeCapsule: Identifiable, Sendable, Codable {
     let id: UUID
     let title: String
     let message: String
     let recipient: String
     let deliveryDate: Date
     let createdDate: Date
-    let isDelivered: Bool
 
-    init(id: UUID = UUID(), title: String, message: String, recipient: String, deliveryDate: Date, createdDate: Date, isDelivered: Bool = false) {
+    /// A capsule is delivered once its delivery date has arrived.
+    var isDelivered: Bool {
+        deliveryDate <= Date()
+    }
+
+    init(id: UUID = UUID(), title: String, message: String, recipient: String, deliveryDate: Date, createdDate: Date) {
         self.id = id
         self.title = title
         self.message = message
         self.recipient = recipient
         self.deliveryDate = deliveryDate
         self.createdDate = createdDate
-        self.isDelivered = isDelivered
     }
 
 }
@@ -181,10 +204,24 @@ struct TimeCapsuleCard: View {
 
 struct CreateCapsuleSheet: View {
     @Environment(\.dismiss) private var dismiss
+    let onSeal: (TimeCapsule) -> Void
     @State private var title: String = ""
     @State private var message: String = ""
     @State private var recipient: String = ""
     @State private var deliveryDate: Date = Calendar.current.date(byAdding: .month, value: 1, to: Date())!
+
+    private func seal() {
+        let trimmedRecipient = recipient.trimmingCharacters(in: .whitespaces)
+        let capsule = TimeCapsule(
+            title: title.trimmingCharacters(in: .whitespaces),
+            message: message,
+            recipient: trimmedRecipient.isEmpty ? "Future me" : trimmedRecipient,
+            deliveryDate: deliveryDate,
+            createdDate: Date()
+        )
+        onSeal(capsule)
+        dismiss()
+    }
 
     var body: some View {
         NavigationStack {
@@ -199,17 +236,6 @@ struct CreateCapsuleSheet: View {
                     TextEditor(text: $message)
                         .frame(minHeight: 120)
                 }
-
-                Section("Attachments") {
-                    Button {
-                    } label: {
-                        Label("Add Photos", systemImage: "photo.on.rectangle")
-                    }
-                    Button {
-                    } label: {
-                        Label("Add Voice Note", systemImage: "mic.fill")
-                    }
-                }
             }
             .navigationTitle("New Time Capsule")
             .navigationBarTitleDisplayMode(.inline)
@@ -218,9 +244,56 @@ struct CreateCapsuleSheet: View {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Seal") { dismiss() }
+                    Button("Seal") { seal() }
                         .fontWeight(.semibold)
-                        .disabled(title.isEmpty || message.isEmpty)
+                        .disabled(title.trimmingCharacters(in: .whitespaces).isEmpty || message.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+        }
+    }
+}
+
+struct CapsuleDetailSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let capsule: TimeCapsule
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "envelope.open.fill")
+                            .font(.title2)
+                            .foregroundStyle(.green)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(capsule.title)
+                                .font(.title3.weight(.bold))
+                            Text("To: \(capsule.recipient)")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Text(capsule.message)
+                        .font(.body)
+
+                    Divider()
+
+                    HStack {
+                        Label("Sealed \(capsule.createdDate, style: .date)", systemImage: "lock")
+                        Spacer()
+                        Label("Opened \(capsule.deliveryDate, style: .date)", systemImage: "calendar")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+                .padding(20)
+            }
+            .navigationTitle("Capsule")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
                 }
             }
         }
