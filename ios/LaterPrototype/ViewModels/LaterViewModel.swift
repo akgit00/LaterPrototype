@@ -22,6 +22,10 @@ final class LaterViewModel {
     var isSyncing = false
     var syncError: String?
 
+    /// Surfaced to the comment UI when posting a comment fails, so the failure
+    /// isn't silent. Cleared whenever a new comment attempt starts.
+    var commentError: String?
+
     /// The signed-in user's id; nil when offline / unauthenticated.
     private(set) var currentUserID: String?
     /// The signed-in user's @username, resolved from their cloud profile.
@@ -374,6 +378,7 @@ final class LaterViewModel {
         guard !trimmed.isEmpty else { return }
         guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
 
+        commentError = nil
         let name = currentUsername ?? "You"
         // Optimistically show the comment immediately, and track it as pending so
         // a concurrent poll can't wipe it before the server confirms.
@@ -406,6 +411,7 @@ final class LaterViewModel {
                 memories[memoryIndex].comments.removeAll { $0.id == local.id }
                 persist()
             }
+            commentError = error.localizedDescription
             syncError = error.localizedDescription
         }
     }

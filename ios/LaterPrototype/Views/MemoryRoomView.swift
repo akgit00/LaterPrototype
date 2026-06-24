@@ -833,6 +833,13 @@ struct MemoryMediaSheet: View {
                 }
             }
 
+            if let commentError = viewModel.commentError {
+                Label(commentError, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 20)
+            }
+
             CommentInputView(memoryID: memoryID, viewModel: viewModel)
                 .padding(.horizontal, 20)
                 .padding(.top, 4)
