@@ -6,6 +6,8 @@ nonisolated struct CloudProfile: Codable, Sendable, Identifiable {
     let username: String
     let display_name: String?
     let email: String?
+    let bio: String?
+    let avatar_url: String?
 
     /// Minimal projection used for existence checks (selects only `id`).
     nonisolated struct Stub: Codable, Sendable {
@@ -110,11 +112,39 @@ nonisolated enum CloudMemoryService {
             method: "GET",
             query: [
                 URLQueryItem(name: "id", value: "eq.\(id)"),
-                URLQueryItem(name: "select", value: "id,username,display_name,email"),
+                URLQueryItem(name: "select", value: "id,username,display_name,email,bio,avatar_url"),
                 URLQueryItem(name: "limit", value: "1"),
             ]
         )
         return try SupabaseREST.makeDecoder().decode([CloudProfile].self, from: data).first
+    }
+
+    /// Persists the user's editable profile fields (name, bio, avatar) to their
+    /// own profile row. Silently ignores failures so the local edit still stands.
+    static func updateProfileDetails(userID: String, displayName: String?, bio: String?, avatarURL: String?) async {
+        struct DetailsUpdate: Encodable {
+            let display_name: String?
+            let bio: String?
+            let avatar_url: String?
+        }
+        let row = DetailsUpdate(display_name: displayName, bio: bio, avatar_url: avatarURL)
+        guard let body = try? SupabaseREST.makeEncoder().encode(row) else { return }
+        try? await SupabaseREST.request(
+            path: "profiles",
+            method: "PATCH",
+            query: [URLQueryItem(name: "id", value: "eq.\(userID)")],
+            body: body,
+            prefer: "return=minimal"
+        )
+    }
+
+    /// Uploads a locally-stored avatar image to Storage and returns its public
+    /// URL. Returns nil for non-local or already-remote URLs.
+    static func uploadAvatar(_ urlString: String, userID: String) async -> String? {
+        guard let url = URL(string: urlString), url.isFileURL,
+              let data = try? Data(contentsOf: url) else { return nil }
+        let path = "\(userID)/avatar/\(UUID().uuidString).jpg"
+        return try? await SupabaseREST.uploadMedia(data, path: path, contentType: "image/jpeg")
     }
 
     /// Looks up a friend by exact `@username` or email address.

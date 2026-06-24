@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @Environment(AuthManager.self) private var auth
+    @Environment(ProfileManager.self) private var profile
     @Environment(\.scenePhase) private var scenePhase
     @State private var viewModel = LaterViewModel()
     @State private var selectedTab: Int = 0
@@ -24,6 +25,7 @@ struct ContentView: View {
         .task(id: auth.user?.id) {
             guard let user = auth.user else { return }
             viewModel.configure(userID: user.id, email: user.email, displayName: user.name)
+            await profile.configure(userID: user.id)
             await viewModel.sync()
         }
         // Periodically poll the cloud while the app is active so new comments,

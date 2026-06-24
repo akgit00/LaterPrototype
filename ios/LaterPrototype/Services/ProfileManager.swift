@@ -7,7 +7,11 @@ import SwiftUI
 class ProfileManager {
     var displayNameOverride: String?
     var bioOverride: String?
+    /// Holds either a local file URL (just-picked, pending upload) or, once
+    /// synced, the remote Storage URL of the avatar.
     var avatarLocalURL: String?
+
+    private var userID: String?
 
     private let nameKey = "profile_displayName"
     private let bioKey = "profile_bio"
@@ -20,7 +24,19 @@ class ProfileManager {
         avatarLocalURL = defaults.string(forKey: avatarKey)
     }
 
-    /// Applies edited values, treating empty input as "use the default".
+    /// Loads the signed-in user's saved profile from Supabase so customizations
+    /// survive logout and reinstalls. Falls back to whatever is cached locally.
+    func configure(userID: String) async {
+        self.userID = userID
+        guard let cloud = (try? await CloudMemoryService.fetchProfile(id: userID)) ?? nil else { return }
+        if let name = cloud.display_name, !name.isEmpty { displayNameOverride = name }
+        if let bio = cloud.bio, !bio.isEmpty { bioOverride = bio }
+        if let avatar = cloud.avatar_url, !avatar.isEmpty { avatarLocalURL = avatar }
+        persist()
+    }
+
+    /// Applies edited values, treating empty input as "use the default", then
+    /// syncs them to Supabase (uploading a freshly-picked avatar if needed).
     func update(displayName: String, bio: String, avatarLocalURL: String?) {
         let trimmedName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         displayNameOverride = trimmedName.isEmpty ? nil : trimmedName
@@ -35,13 +51,39 @@ class ProfileManager {
         self.avatarLocalURL = avatarLocalURL
 
         persist()
+        Task { await syncToCloud() }
     }
 
-    /// Clears all profile customizations (used on sign-out).
+    /// Uploads a local avatar (if any) and writes name/bio/avatar to Supabase.
+    private func syncToCloud() async {
+        guard let userID else { return }
+
+        var avatarRemote = avatarLocalURL
+        if let local = avatarLocalURL, let url = URL(string: local), url.isFileURL {
+            if let uploaded = await CloudMemoryService.uploadAvatar(local, userID: userID) {
+                avatarRemote = uploaded
+                // Swap the local file path for the durable remote URL.
+                MediaStore.deleteFile(at: local)
+                avatarLocalURL = uploaded
+                persist()
+            }
+        }
+
+        await CloudMemoryService.updateProfileDetails(
+            userID: userID,
+            displayName: displayNameOverride,
+            bio: bioOverride,
+            avatarURL: avatarRemote
+        )
+    }
+
+    /// Clears the locally-cached profile on sign-out. The cloud copy stays
+    /// intact and is reloaded by `configure(userID:)` on the next sign-in.
     func clear() {
         if let avatar = avatarLocalURL {
             MediaStore.deleteFile(at: avatar)
         }
+        userID = nil
         displayNameOverride = nil
         bioOverride = nil
         avatarLocalURL = nil
