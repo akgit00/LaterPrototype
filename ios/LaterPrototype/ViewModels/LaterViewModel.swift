@@ -522,8 +522,14 @@ final class LaterViewModel {
         guard !memories[index].songs.contains(where: { $0.id == song.id }) else { return }
         memories[index].songs.append(song)
         persist()
-        Task {
-            try? await SongService.post(memoryID: memoryID, song: song)
+        Task { @MainActor in
+            do {
+                try await SongService.post(memoryID: memoryID, song: song)
+            } catch {
+                // Surface the failure instead of swallowing it, so a song that
+                // never reaches the cloud (e.g. a missing table grant) isn't silent.
+                syncError = error.localizedDescription
+            }
             if isOwned(memoryID) { await pushMemory(memoryID) }
         }
     }
