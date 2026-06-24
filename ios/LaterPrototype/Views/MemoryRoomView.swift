@@ -13,7 +13,6 @@ struct MemoryRoomView: View {
     @State private var showPhotoViewer: Bool = false
     @State private var selectedDetent: PresentationDetent = .fraction(0.45)
     @State private var showMediaSheet: Bool = true
-    @State private var showAddPlaylistSheet: Bool = false
     @State private var showAddPeopleSheet: Bool = false
     @State private var playingVideoURL: URL?
     @State private var showDeleteMemoryConfirm: Bool = false
@@ -68,12 +67,7 @@ struct MemoryRoomView: View {
                 selectedPhotoIndex: $selectedPhotoIndex,
                 showPhotoViewer: $showPhotoViewer,
                 playingVideoURL: $playingVideoURL,
-                onAddPlaylist: {
-                    showAddPlaylistSheet = true
-                },
-                onAddPeople: {
-                    showAddPeopleSheet = true
-                }
+                showAddPeopleSheet: $showAddPeopleSheet
             )
             .presentationDetents([.fraction(0.15), .fraction(0.45), .large], selection: $selectedDetent)
             .presentationDragIndicator(.visible)
@@ -81,14 +75,6 @@ struct MemoryRoomView: View {
             .presentationCornerRadius(24)
             .presentationContentInteraction(.scrolls)
             .interactiveDismissDisabled()
-        }
-        .sheet(isPresented: $showAddPlaylistSheet) {
-            AddPlaylistSheet(memoryID: memoryID, viewModel: viewModel)
-                .presentationDetents([.medium])
-        }
-        .sheet(isPresented: $showAddPeopleSheet) {
-            AddPeopleSheet(memoryID: memoryID, viewModel: viewModel)
-                .presentationDetents([.medium, .large])
         }
         .confirmationDialog(
             "Delete this memory?",
@@ -180,13 +166,13 @@ struct MemoryMediaSheet: View {
     @Binding var selectedPhotoIndex: Int?
     @Binding var showPhotoViewer: Bool
     @Binding var playingVideoURL: URL?
-    let onAddPlaylist: () -> Void
-    let onAddPeople: () -> Void
+    @Binding var showAddPeopleSheet: Bool
 
     @State private var selectedSection: MediaSection = .photos
     @State private var showAddPhotosPicker: Bool = false
     @State private var selectedPhotosItems: [PhotosPickerItem] = []
     @State private var isImporting: Bool = false
+    @State private var showAddPlaylistSheet: Bool = false
 
     private var memory: Memory {
         viewModel.memoryByID(memoryID) ?? Memory(title: "", centerCoordinate: CLLocationCoordinate2D())
@@ -289,6 +275,14 @@ struct MemoryMediaSheet: View {
         }
         .fullScreenCover(item: $playingVideoURL) { url in
             VideoPlayerView(url: url)
+        }
+        .sheet(isPresented: $showAddPlaylistSheet) {
+            AddPlaylistSheet(memoryID: memoryID, viewModel: viewModel)
+                .presentationDetents([.medium])
+        }
+        .sheet(isPresented: $showAddPeopleSheet) {
+            AddPeopleSheet(memoryID: memoryID, viewModel: viewModel)
+                .presentationDetents([.medium, .large])
         }
     }
 
@@ -551,7 +545,7 @@ struct MemoryMediaSheet: View {
                 .padding(.horizontal, 20)
                 .contextMenu {
                     Button {
-                        onAddPlaylist()
+                        showAddPlaylistSheet = true
                     } label: {
                         Label("Change Playlist", systemImage: "arrow.triangle.2.circlepath")
                     }
@@ -638,7 +632,7 @@ struct MemoryMediaSheet: View {
                         .foregroundStyle(.tertiary)
                         .multilineTextAlignment(.center)
                     Button {
-                        onAddPlaylist()
+                        showAddPlaylistSheet = true
                     } label: {
                         Label("Link Playlist", systemImage: "link.badge.plus")
                             .font(.subheadline.weight(.medium))
@@ -697,7 +691,7 @@ struct MemoryMediaSheet: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
-                    onAddPeople()
+                    showAddPeopleSheet = true
                 } label: {
                     Label("Add", systemImage: "person.badge.plus")
                         .font(.subheadline.weight(.medium))
@@ -714,7 +708,7 @@ struct MemoryMediaSheet: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     Button {
-                        onAddPeople()
+                        showAddPeopleSheet = true
                     } label: {
                         Label("Add People", systemImage: "person.badge.plus")
                             .font(.subheadline.weight(.medium))
