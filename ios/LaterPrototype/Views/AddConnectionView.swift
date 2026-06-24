@@ -17,6 +17,10 @@ struct AddConnectionView: View {
         let isError: Bool
     }
 
+    private var isDisabled: Bool {
+        isSending || identifier.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 20) {
@@ -67,10 +71,11 @@ struct AddConnectionView: View {
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 14)
+                    .foregroundStyle(.white)
+                    .background(isDisabled ? AnyShapeStyle(Color.blue.opacity(0.35)) : AnyShapeStyle(Color.blue), in: .capsule)
                 }
-                .buttonStyle(.borderedProminent)
-                .clipShape(.capsule)
-                .disabled(isSending || identifier.trimmingCharacters(in: .whitespaces).isEmpty)
+                .buttonStyle(.plain)
+                .disabled(isDisabled)
                 .padding(.horizontal, 20)
 
                 Spacer()
