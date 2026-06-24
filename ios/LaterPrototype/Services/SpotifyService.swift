@@ -261,6 +261,36 @@ final class SpotifyService: NSObject {
         return response.playlists?.items.compactMap { $0 } ?? []
     }
 
+    /// Extracts a playlist ID from a Spotify share link or URI.
+    /// Handles `https://open.spotify.com/playlist/ID?si=...` and `spotify:playlist:ID`.
+    nonisolated static func playlistID(from urlString: String) -> String? {
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let uriPrefix = "spotify:playlist:"
+        if trimmed.hasPrefix(uriPrefix) {
+            let id = String(trimmed.dropFirst(uriPrefix.count))
+            return id.isEmpty ? nil : id
+        }
+
+        guard let components = URLComponents(string: trimmed) else { return nil }
+        let parts = components.path.split(separator: "/").map(String.init)
+        guard let index = parts.firstIndex(of: "playlist"), index + 1 < parts.count else { return nil }
+        let id = parts[index + 1]
+        return id.isEmpty ? nil : id
+    }
+
+    /// Resolves a pasted playlist link/URI into a full `PlaylistAttachment`,
+    /// pulling the real name, cover, and tracks from Spotify.
+    func importPlaylist(fromURL urlString: String) async throws -> PlaylistAttachment {
+        guard let id = Self.playlistID(from: urlString) else { throw SpotifyError.invalidResponse }
+        let data = try await get("playlists/\(id)", query: [
+            URLQueryItem(name: "fields", value: "id,name,images,external_urls,tracks(total)"),
+        ])
+        let ref = try JSONDecoder().decode(SpotifyPlaylistRef.self, from: data)
+        return try await importPlaylist(ref)
+    }
+
     /// Resolves a chosen playlist into a full `PlaylistAttachment` with tracks.
     func importPlaylist(_ ref: SpotifyPlaylistRef) async throws -> PlaylistAttachment {
         let data = try await get("playlists/\(ref.id)/tracks", query: [

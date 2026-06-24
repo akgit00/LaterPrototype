@@ -541,6 +541,25 @@ struct MemoryMediaSheet: View {
                                 .foregroundStyle(.white)
                         }
                     }
+
+                    Menu {
+                        Button {
+                            showAddPlaylistSheet = true
+                        } label: {
+                            Label("Change Playlist", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                        Button(role: .destructive) {
+                            viewModel.removePlaylist(from: memoryID)
+                        } label: {
+                            Label("Remove Playlist", systemImage: "trash")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .font(.title3)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
                 }
                 .padding(.horizontal, 20)
                 .contextMenu {
@@ -1001,8 +1020,17 @@ struct AddPlaylistSheet: View {
     @State private var playlistName: String = ""
     @State private var selectedSource: PlaylistSource = .spotify
     @State private var showSpotifyBrowse: Bool = false
+    @State private var isResolving: Bool = false
+    @State private var errorMessage: String?
 
     private let spotifyGreen = Color(red: 0.11, green: 0.84, blue: 0.38)
+
+    /// A pasted Spotify link we can auto-resolve into a real name + tracks.
+    private var canAutoResolve: Bool {
+        selectedSource == .spotify
+            && SpotifyConfig.isConfigured
+            && SpotifyService.playlistID(from: playlistURL) != nil
+    }
 
     var body: some View {
         NavigationStack {
@@ -1036,15 +1064,6 @@ struct AddPlaylistSheet: View {
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Playlist Name")
-                        .font(.subheadline.weight(.medium))
-
-                    TextField("My Playlist", text: $playlistName)
-                        .padding(12)
-                        .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 10))
-                }
-
-                VStack(alignment: .leading, spacing: 8) {
                     Text("Playlist Link")
                         .font(.subheadline.weight(.medium))
 
@@ -1057,34 +1076,57 @@ struct AddPlaylistSheet: View {
                             .textFieldStyle(.plain)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
+                            .onChange(of: playlistURL) { _, _ in errorMessage = nil }
                     }
                     .padding(12)
                     .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 10))
+
+                    if canAutoResolve {
+                        Label("We'll grab the playlist name and songs for you", systemImage: "sparkles")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(canAutoResolve ? "Playlist Name (optional)" : "Playlist Name")
+                        .font(.subheadline.weight(.medium))
+
+                    TextField(canAutoResolve ? "Filled in automatically" : "My Playlist", text: $playlistName)
+                        .padding(12)
+                        .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 10))
+                }
+
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 Spacer()
 
                 Button {
-                    let playlist = PlaylistAttachment(
-                        name: playlistName.isEmpty ? "My Playlist" : playlistName,
-                        source: selectedSource,
-                        externalURL: playlistURL.isEmpty ? nil : playlistURL
-                    )
-                    viewModel.setPlaylist(for: memoryID, playlist: playlist)
-                    dismiss()
+                    linkPlaylist()
                 } label: {
-                    Text("Link Playlist")
-                        .font(.body.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .background(
-                            selectedSource == .spotify ? Color.green : Color.pink,
-                            in: RoundedRectangle(cornerRadius: 14)
-                        )
-                        .foregroundStyle(.white)
+                    HStack(spacing: 8) {
+                        if isResolving {
+                            ProgressView()
+                                .tint(.white)
+                        }
+                        Text(isResolving ? "Fetching..." : "Link Playlist")
+                            .font(.body.weight(.semibold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(
+                        selectedSource == .spotify ? Color.green : Color.pink,
+                        in: RoundedRectangle(cornerRadius: 14)
+                    )
+                    .foregroundStyle(.white)
                 }
-                .disabled(playlistURL.isEmpty && playlistName.isEmpty)
-                .opacity((playlistURL.isEmpty && playlistName.isEmpty) ? 0.5 : 1)
+                .disabled(isSubmitDisabled)
+                .opacity(isSubmitDisabled ? 0.5 : 1)
             }
             .padding(20)
             .navigationTitle("Link Playlist")
@@ -1098,6 +1140,46 @@ struct AddPlaylistSheet: View {
                 SpotifyBrowseView(memoryID: memoryID, viewModel: viewModel) {
                     dismiss()
                 }
+            }
+        }
+    }
+
+    private var isSubmitDisabled: Bool {
+        if isResolving { return true }
+        if canAutoResolve { return false }
+        return playlistURL.isEmpty && playlistName.isEmpty
+    }
+
+    /// Links the playlist. For a recognized Spotify link we fetch the real name,
+    /// cover, and tracks from the API; otherwise we store the link as-is.
+    private func linkPlaylist() {
+        let trimmedURL = playlistURL.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard canAutoResolve else {
+            let playlist = PlaylistAttachment(
+                name: playlistName.isEmpty ? "My Playlist" : playlistName,
+                source: selectedSource,
+                externalURL: trimmedURL.isEmpty ? nil : trimmedURL
+            )
+            viewModel.setPlaylist(for: memoryID, playlist: playlist)
+            dismiss()
+            return
+        }
+
+        isResolving = true
+        errorMessage = nil
+        Task {
+            do {
+                if !SpotifyService.shared.isConnected {
+                    try await SpotifyService.shared.connect()
+                }
+                let playlist = try await SpotifyService.shared.importPlaylist(fromURL: trimmedURL)
+                viewModel.setPlaylist(for: memoryID, playlist: playlist)
+                isResolving = false
+                dismiss()
+            } catch {
+                isResolving = false
+                errorMessage = error.localizedDescription
             }
         }
     }
