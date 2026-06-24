@@ -119,6 +119,25 @@ final class LaterViewModel {
         persist()
 
         // Pull the full set the server says we can see.
+        await pullCloudState(userID: userID)
+    }
+
+    /// Lightweight refresh used for foreground/periodic polling. Re-pulls
+    /// connections (friend requests), shared memories, comments, media and
+    /// playlists so changes made by other people show up without restarting
+    /// the app. Unlike `sync()` it doesn't re-upload local memories.
+    @MainActor
+    func refresh() async {
+        guard let userID = currentUserID, SupabaseREST.hasSession else { return }
+        guard !isSyncing else { return }
+        await loadConnections()
+        await pullCloudState(userID: userID)
+    }
+
+    /// Pulls everything the user can see (own + shared memories) and merges in
+    /// the latest comments, media and playlists.
+    @MainActor
+    private func pullCloudState(userID: String) async {
         do {
             let rows = try await CloudMemoryService.fetchMemories()
             ownedMemoryIDs = Set(rows.filter { $0.owner_id == userID }.map { $0.id })

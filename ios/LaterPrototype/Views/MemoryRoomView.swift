@@ -60,6 +60,15 @@ struct MemoryRoomView: View {
 
             headerOverlay
         }
+        // While a memory room is open, poll more frequently so comments and
+        // media added by others appear within a few seconds.
+        .task(id: memoryID) {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(6))
+                if Task.isCancelled { break }
+                await viewModel.refresh()
+            }
+        }
         .sheet(isPresented: $showMediaSheet) {
             MemoryMediaSheet(
                 memoryID: memoryID,
