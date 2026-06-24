@@ -173,6 +173,7 @@ struct MemoryMediaSheet: View {
     @State private var selectedPhotosItems: [PhotosPickerItem] = []
     @State private var isImporting: Bool = false
     @State private var showAddPlaylistSheet: Bool = false
+    @State private var showAddSongSheet: Bool = false
 
     private var memory: Memory {
         viewModel.memoryByID(memoryID) ?? Memory(title: "", centerCoordinate: CLLocationCoordinate2D())
@@ -280,6 +281,10 @@ struct MemoryMediaSheet: View {
             AddPlaylistSheet(memoryID: memoryID, viewModel: viewModel)
                 .presentationDetents([.medium])
         }
+        .sheet(isPresented: $showAddSongSheet) {
+            AddSongSheet(memoryID: memoryID, viewModel: viewModel)
+                .presentationDetents([.medium])
+        }
         .sheet(isPresented: $showAddPeopleSheet) {
             AddPeopleSheet(memoryID: memoryID, viewModel: viewModel)
                 .presentationDetents([.medium, .large])
@@ -326,7 +331,9 @@ struct MemoryMediaSheet: View {
         switch section {
         case .photos: return memory.photoURLs.count
         case .videos: return memory.videos.count
-        case .playlist: return memory.playlist != nil ? 1 : nil
+        case .playlist:
+            let count = (memory.playlist != nil ? 1 : 0) + memory.songs.count
+            return count > 0 ? count : nil
         case .comments: return memory.comments.count
         case .people: return memory.connections.count
         }
@@ -483,8 +490,149 @@ struct MemoryMediaSheet: View {
     }
 
     private var playlistSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if let playlist = memory.playlist {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Button {
+                    showAddPlaylistSheet = true
+                } label: {
+                    Label("Playlist", systemImage: "music.note.list")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 11)
+                        .background(Color(.tertiarySystemFill), in: Capsule())
+                        .foregroundStyle(.primary)
+                }
+                Button {
+                    showAddSongSheet = true
+                } label: {
+                    Label("Song", systemImage: "music.note")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 11)
+                        .background(Color(.tertiarySystemFill), in: Capsule())
+                        .foregroundStyle(.primary)
+                }
+            }
+            .padding(.horizontal, 20)
+
+            if memory.playlist != nil {
+                linkedPlaylistView
+            }
+
+            if !memory.songs.isEmpty {
+                songsListView
+            }
+
+            if memory.playlist == nil && memory.songs.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "music.note.list")
+                        .font(.system(size: 32))
+                        .foregroundStyle(.tertiary)
+                    Text("No music yet")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Text("Link a playlist, or paste a song link to add tracks to this memory")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 24)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 32)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var songsListView: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("\(memory.songs.count) \(memory.songs.count == 1 ? "Song" : "Songs")")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 20)
+
+            VStack(spacing: 0) {
+                ForEach(Array(memory.songs.enumerated()), id: \.element.id) { index, song in
+                    HStack(spacing: 12) {
+                        if let art = song.albumArtURL {
+                            Color(.tertiarySystemBackground)
+                                .frame(width: 44, height: 44)
+                                .overlay {
+                                    AsyncImage(url: URL(string: art)) { phase in
+                                        if let image = phase.image {
+                                            image
+                                                .resizable()
+                                                .aspectRatio(contentMode: .fill)
+                                                .allowsHitTesting(false)
+                                        }
+                                    }
+                                }
+                                .clipShape(.rect(cornerRadius: 6))
+                        } else {
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(Color(.tertiarySystemFill))
+                                .frame(width: 44, height: 44)
+                                .overlay {
+                                    Image(systemName: "music.note")
+                                        .font(.caption)
+                                        .foregroundStyle(.tertiary)
+                                }
+                        }
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(song.title)
+                                .font(.subheadline)
+                                .lineLimit(1)
+                            Text(song.artist.isEmpty ? "Song" : song.artist)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+
+                        Spacer()
+
+                        if let urlString = song.externalURL, let url = URL(string: urlString) {
+                            Button {
+                                UIApplication.shared.open(url)
+                            } label: {
+                                Image(systemName: "play.circle.fill")
+                                    .font(.title2)
+                                    .foregroundStyle(.green)
+                            }
+                        }
+
+                        Button {
+                            viewModel.removeSong(from: memoryID, song: song)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.title3)
+                                .symbolRenderingMode(.hierarchical)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 20)
+                    .contextMenu {
+                        Button(role: .destructive) {
+                            viewModel.removeSong(from: memoryID, song: song)
+                        } label: {
+                            Label("Remove Song", systemImage: "trash")
+                        }
+                    }
+
+                    if index < memory.songs.count - 1 {
+                        Divider()
+                            .padding(.leading, 76)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var linkedPlaylistView: some View {
+        if let playlist = memory.playlist {
+            VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 12) {
                     Color(.tertiarySystemBackground)
                         .frame(width: 56, height: 56)
@@ -575,6 +723,7 @@ struct MemoryMediaSheet: View {
                     }
                 }
 
+                if !playlist.tracks.isEmpty {
                 Divider()
                     .padding(.horizontal, 20)
 
@@ -638,28 +787,7 @@ struct MemoryMediaSheet: View {
                         }
                     }
                 }
-            } else {
-                VStack(spacing: 12) {
-                    Image(systemName: "music.note.list")
-                        .font(.system(size: 32))
-                        .foregroundStyle(.tertiary)
-                    Text("No playlist linked")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    Text("Add a Spotify or Apple Music playlist to this memory")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .multilineTextAlignment(.center)
-                    Button {
-                        showAddPlaylistSheet = true
-                    } label: {
-                        Label("Link Playlist", systemImage: "link.badge.plus")
-                            .font(.subheadline.weight(.medium))
-                    }
-                    .buttonStyle(.bordered)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 32)
             }
         }
     }
@@ -1175,6 +1303,160 @@ struct AddPlaylistSheet: View {
                 }
                 let playlist = try await SpotifyService.shared.importPlaylist(fromURL: trimmedURL)
                 viewModel.setPlaylist(for: memoryID, playlist: playlist)
+                isResolving = false
+                dismiss()
+            } catch {
+                isResolving = false
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+}
+
+struct AddSongSheet: View {
+    let memoryID: UUID
+    let viewModel: LaterViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var songURL: String = ""
+    @State private var manualTitle: String = ""
+    @State private var manualArtist: String = ""
+    @State private var isResolving: Bool = false
+    @State private var errorMessage: String?
+
+    /// Track links found in the pasted text (supports multiple, separated by
+    /// spaces, commas, or new lines).
+    private var trackLinks: [String] {
+        songURL
+            .split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "," })
+            .map(String.init)
+            .filter { SpotifyService.trackID(from: $0) != nil }
+    }
+
+    /// A pasted Spotify track link we can auto-resolve into a real song.
+    private var canAutoResolve: Bool {
+        SpotifyConfig.isConfigured && !trackLinks.isEmpty
+    }
+
+    private var isSubmitDisabled: Bool {
+        if isResolving { return true }
+        if canAutoResolve { return false }
+        return songURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && manualTitle.isEmpty
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 24) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Song Link")
+                        .font(.subheadline.weight(.medium))
+
+                    HStack(spacing: 10) {
+                        Image(systemName: "music.note")
+                            .foregroundStyle(.green)
+                            .frame(width: 24)
+
+                        TextField("Paste a Spotify song link...", text: $songURL, axis: .vertical)
+                            .textFieldStyle(.plain)
+                            .lineLimit(1...3)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                            .onChange(of: songURL) { _, _ in errorMessage = nil }
+                    }
+                    .padding(12)
+                    .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 10))
+
+                    if canAutoResolve {
+                        Label(
+                            trackLinks.count > 1
+                                ? "We'll add \(trackLinks.count) songs for you"
+                                : "We'll grab the song name and artwork for you",
+                            systemImage: "sparkles"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+
+                if !canAutoResolve {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Song Name")
+                            .font(.subheadline.weight(.medium))
+                        TextField("Song title", text: $manualTitle)
+                            .padding(12)
+                            .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 10))
+
+                        TextField("Artist (optional)", text: $manualArtist)
+                            .padding(12)
+                            .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 10))
+                    }
+                }
+
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                Spacer()
+
+                Button {
+                    addSongs()
+                } label: {
+                    HStack(spacing: 8) {
+                        if isResolving {
+                            ProgressView()
+                                .tint(.white)
+                        }
+                        Text(isResolving ? "Fetching..." : "Add Song")
+                            .font(.body.weight(.semibold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(Color.green, in: RoundedRectangle(cornerRadius: 14))
+                    .foregroundStyle(.white)
+                }
+                .disabled(isSubmitDisabled)
+                .opacity(isSubmitDisabled ? 0.5 : 1)
+            }
+            .padding(20)
+            .navigationTitle("Add Song")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+    }
+
+    /// Adds the song(s). For recognized Spotify track links we fetch the real
+    /// name, artist, and artwork; otherwise we store a manual entry.
+    private func addSongs() {
+        guard canAutoResolve else {
+            let trimmedURL = songURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            let song = PlaylistTrack(
+                title: manualTitle.isEmpty ? "Song" : manualTitle,
+                artist: manualArtist,
+                externalURL: trimmedURL.isEmpty ? nil : trimmedURL
+            )
+            viewModel.addSong(to: memoryID, song: song)
+            dismiss()
+            return
+        }
+
+        let links = trackLinks
+        isResolving = true
+        errorMessage = nil
+        Task {
+            do {
+                if !SpotifyService.shared.isConnected {
+                    try await SpotifyService.shared.connect()
+                }
+                for link in links {
+                    let song = try await SpotifyService.shared.importTrack(fromURL: link)
+                    viewModel.addSong(to: memoryID, song: song)
+                }
                 isResolving = false
                 dismiss()
             } catch {

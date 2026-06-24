@@ -52,6 +52,16 @@ nonisolated private struct SpotifyTracksPage: Codable, Sendable {
     nonisolated struct Album: Codable, Sendable { let images: [SpotifyImage]? }
 }
 
+nonisolated private struct SpotifyTrackResponse: Codable, Sendable {
+    let name: String
+    let duration_ms: Int?
+    let artists: [Artist]?
+    let album: Album?
+    let external_urls: [String: String]?
+    nonisolated struct Artist: Codable, Sendable { let name: String }
+    nonisolated struct Album: Codable, Sendable { let images: [SpotifyImage]? }
+}
+
 nonisolated private struct SpotifyTokenResponse: Codable, Sendable {
     let access_token: String
     let refresh_token: String?
@@ -278,6 +288,40 @@ final class SpotifyService: NSObject {
         guard let index = parts.firstIndex(of: "playlist"), index + 1 < parts.count else { return nil }
         let id = parts[index + 1]
         return id.isEmpty ? nil : id
+    }
+
+    /// Extracts a track ID from a Spotify share link or URI.
+    /// Handles `https://open.spotify.com/track/ID?si=...` and `spotify:track:ID`.
+    nonisolated static func trackID(from urlString: String) -> String? {
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let uriPrefix = "spotify:track:"
+        if trimmed.hasPrefix(uriPrefix) {
+            let id = String(trimmed.dropFirst(uriPrefix.count))
+            return id.isEmpty ? nil : id
+        }
+
+        guard let components = URLComponents(string: trimmed) else { return nil }
+        let parts = components.path.split(separator: "/").map(String.init)
+        guard let index = parts.firstIndex(of: "track"), index + 1 < parts.count else { return nil }
+        let id = parts[index + 1]
+        return id.isEmpty ? nil : id
+    }
+
+    /// Resolves a pasted track link/URI into a `PlaylistTrack`, pulling the real
+    /// name, artist, and album art from Spotify.
+    func importTrack(fromURL urlString: String) async throws -> PlaylistTrack {
+        guard let id = Self.trackID(from: urlString) else { throw SpotifyError.invalidResponse }
+        let data = try await get("tracks/\(id)")
+        let track = try JSONDecoder().decode(SpotifyTrackResponse.self, from: data)
+        return PlaylistTrack(
+            title: track.name,
+            artist: track.artists?.map { $0.name }.joined(separator: ", ") ?? "",
+            albumArtURL: track.album?.images?.first?.url,
+            duration: Self.formatDuration(track.duration_ms),
+            externalURL: track.external_urls?["spotify"]
+        )
     }
 
     /// Resolves a pasted playlist link/URI into a full `PlaylistAttachment`,

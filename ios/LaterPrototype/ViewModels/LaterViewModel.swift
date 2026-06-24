@@ -426,6 +426,24 @@ final class LaterViewModel {
         }
     }
 
+    /// Adds an individual song to a memory. Stored in the memory payload and
+    /// synced to the cloud for memories the current user owns.
+    func addSong(to memoryID: UUID, song: PlaylistTrack) {
+        guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        guard !memories[index].songs.contains(where: { $0.id == song.id }) else { return }
+        memories[index].songs.append(song)
+        persist()
+        Task { await pushMemory(memoryID) }
+    }
+
+    /// Removes an individual song from a memory.
+    func removeSong(from memoryID: UUID, song: PlaylistTrack) {
+        guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        memories[index].songs.removeAll { $0.id == song.id }
+        persist()
+        Task { await pushMemory(memoryID) }
+    }
+
     /// Removes the linked playlist from a memory for everyone on it.
     func removePlaylist(from memoryID: UUID) {
         guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }

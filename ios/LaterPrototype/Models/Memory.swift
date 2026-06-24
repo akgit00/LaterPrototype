@@ -80,13 +80,16 @@ nonisolated struct PlaylistTrack: Identifiable, Sendable, Codable {
     let artist: String
     let albumArtURL: String?
     let duration: String
+    /// External link (e.g. Spotify track URL) used to open the song.
+    let externalURL: String?
 
-    init(id: UUID = UUID(), title: String, artist: String, albumArtURL: String? = nil, duration: String = "") {
+    init(id: UUID = UUID(), title: String, artist: String, albumArtURL: String? = nil, duration: String = "", externalURL: String? = nil) {
         self.id = id
         self.title = title
         self.artist = artist
         self.albumArtURL = albumArtURL
         self.duration = duration
+        self.externalURL = externalURL
     }
 }
 
@@ -182,6 +185,7 @@ nonisolated struct Memory: Identifiable, Sendable, Codable {
     var chatLog: [ChatMessage]
     var music: MusicAttachment?
     var playlist: PlaylistAttachment?
+    var songs: [PlaylistTrack]
     var comments: [Comment]
     var connections: [Connection]
 
@@ -199,6 +203,7 @@ nonisolated struct Memory: Identifiable, Sendable, Codable {
         chatLog: [ChatMessage] = [],
         music: MusicAttachment? = nil,
         playlist: PlaylistAttachment? = nil,
+        songs: [PlaylistTrack] = [],
         comments: [Comment] = [],
         connections: [Connection] = []
     ) {
@@ -215,6 +220,7 @@ nonisolated struct Memory: Identifiable, Sendable, Codable {
         self.chatLog = chatLog
         self.music = music
         self.playlist = playlist
+        self.songs = songs
         self.comments = comments
         self.connections = connections
     }
@@ -222,7 +228,7 @@ nonisolated struct Memory: Identifiable, Sendable, Codable {
     private enum CodingKeys: String, CodingKey {
         case id, title, subtitle, date, creators
         case centerLatitude, centerLongitude, spanDelta
-        case pins, photoURLs, videos, chatLog, music, playlist, comments, connections
+        case pins, photoURLs, videos, chatLog, music, playlist, songs, comments, connections
     }
 
     nonisolated init(from decoder: Decoder) throws {
@@ -242,6 +248,7 @@ nonisolated struct Memory: Identifiable, Sendable, Codable {
         chatLog = try container.decode([ChatMessage].self, forKey: .chatLog)
         music = try container.decodeIfPresent(MusicAttachment.self, forKey: .music)
         playlist = try container.decodeIfPresent(PlaylistAttachment.self, forKey: .playlist)
+        songs = try container.decodeIfPresent([PlaylistTrack].self, forKey: .songs) ?? []
         comments = try container.decode([Comment].self, forKey: .comments)
         connections = try container.decode([Connection].self, forKey: .connections)
     }
@@ -262,6 +269,7 @@ nonisolated struct Memory: Identifiable, Sendable, Codable {
         try container.encode(chatLog, forKey: .chatLog)
         try container.encodeIfPresent(music, forKey: .music)
         try container.encodeIfPresent(playlist, forKey: .playlist)
+        try container.encode(songs, forKey: .songs)
         try container.encode(comments, forKey: .comments)
         try container.encode(connections, forKey: .connections)
     }
