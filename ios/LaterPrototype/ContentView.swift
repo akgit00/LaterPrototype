@@ -27,13 +27,21 @@ struct ContentView: View {
             await viewModel.sync()
         }
         // Periodically poll the cloud while the app is active so new comments,
-        // friend requests and shared memories appear without a restart.
+        // friend requests and shared memories appear without a restart. Friend
+        // requests are checked every few seconds (cheap) so they show up almost
+        // instantly, while the heavier full pull runs less often.
         .task(id: auth.user?.id) {
             guard auth.user != nil else { return }
+            var tick = 0
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(15))
+                try? await Task.sleep(for: .seconds(5))
                 if Task.isCancelled { break }
-                await viewModel.refresh()
+                tick += 1
+                if tick % 3 == 0 {
+                    await viewModel.refresh()
+                } else {
+                    await viewModel.loadConnections()
+                }
             }
         }
         // Refresh immediately when the app returns to the foreground.
