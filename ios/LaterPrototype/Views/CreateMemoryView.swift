@@ -426,7 +426,7 @@ struct CreateMemoryView: View {
         guard let coord = pinCoordinate else { return }
 
         let selectedPeople = viewModel.allConnections.filter { selectedConnections.contains($0.id) }
-        var creators = ["Samantherr"]
+        var creators = [viewModel.currentUsername ?? "You"]
         creators.append(contentsOf: selectedPeople.map(\.username))
 
         let pin = MemoryPin(
