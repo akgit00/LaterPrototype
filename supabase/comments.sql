@@ -17,6 +17,11 @@ create index if not exists memory_comments_memory_idx on public.memory_comments 
 
 alter table public.memory_comments enable row level security;
 
+-- Base table privileges. RLS controls WHICH rows a role can touch, but the role
+-- still needs table-level grants to touch the table at all. Without this you get
+-- "permission denied for table memory_comments" (42501) even with correct policies.
+grant select, insert, delete on public.memory_comments to authenticated;
+
 -- A reusable check: the signed-in user can access this memory if they own it
 -- or it has been shared with them.
 -- (Inlined in each policy below rather than a function to keep this migration
