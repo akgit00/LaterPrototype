@@ -111,7 +111,9 @@ create table if not exists public.memory_media (
 );
 create index if not exists memory_media_memory_idx on public.memory_media (memory_id);
 alter table public.memory_media enable row level security;
-grant select, insert, delete on public.memory_media to authenticated;
+-- UPDATE is required: videos are written with an upsert (ON CONFLICT DO UPDATE),
+-- which needs UPDATE privilege even when inserting a brand-new row.
+grant select, insert, update, delete on public.memory_media to authenticated;
 
 drop policy if exists "read media on accessible memories" on public.memory_media;
 create policy "read media on accessible memories"
@@ -130,6 +132,24 @@ create policy "add media to accessible memories"
     with check (
         author_id = auth.uid()
         and memory_id in (
+            select id from public.memories where owner_id = auth.uid()
+            union
+            select memory_id from public.memory_shares where shared_with = auth.uid()
+        )
+    );
+
+drop policy if exists "update media on accessible memories" on public.memory_media;
+create policy "update media on accessible memories"
+    on public.memory_media for update to authenticated
+    using (
+        memory_id in (
+            select id from public.memories where owner_id = auth.uid()
+            union
+            select memory_id from public.memory_shares where shared_with = auth.uid()
+        )
+    )
+    with check (
+        memory_id in (
             select id from public.memories where owner_id = auth.uid()
             union
             select memory_id from public.memory_shares where shared_with = auth.uid()
@@ -215,7 +235,9 @@ create table if not exists public.memory_songs (
 );
 create index if not exists memory_songs_memory_idx on public.memory_songs (memory_id);
 alter table public.memory_songs enable row level security;
-grant select, insert, delete on public.memory_songs to authenticated;
+-- UPDATE is required: songs are written with an upsert (ON CONFLICT DO UPDATE),
+-- which needs UPDATE privilege even when inserting a brand-new row.
+grant select, insert, update, delete on public.memory_songs to authenticated;
 
 drop policy if exists "read songs on accessible memories" on public.memory_songs;
 create policy "read songs on accessible memories"
@@ -234,6 +256,24 @@ create policy "add songs to accessible memories"
     with check (
         author_id = auth.uid()
         and memory_id in (
+            select id from public.memories where owner_id = auth.uid()
+            union
+            select memory_id from public.memory_shares where shared_with = auth.uid()
+        )
+    );
+
+drop policy if exists "update songs on accessible memories" on public.memory_songs;
+create policy "update songs on accessible memories"
+    on public.memory_songs for update to authenticated
+    using (
+        memory_id in (
+            select id from public.memories where owner_id = auth.uid()
+            union
+            select memory_id from public.memory_shares where shared_with = auth.uid()
+        )
+    )
+    with check (
+        memory_id in (
             select id from public.memories where owner_id = auth.uid()
             union
             select memory_id from public.memory_shares where shared_with = auth.uid()

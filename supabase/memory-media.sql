@@ -22,7 +22,10 @@ alter table public.memory_media enable row level security;
 -- Base table privileges. RLS controls WHICH rows a role can touch, but the role
 -- still needs table-level grants to touch the table at all. Without this you get
 -- "permission denied for table memory_media" (42501) even with correct policies.
-grant select, insert, delete on public.memory_media to authenticated;
+-- UPDATE is required because videos are written with an upsert (on_conflict +
+-- merge-duplicates), which Postgres runs as INSERT ... ON CONFLICT DO UPDATE and
+-- needs UPDATE privilege even when inserting a brand-new row.
+grant select, insert, update, delete on public.memory_media to authenticated;
 
 -- Read media on any memory you can see (own or shared-with-you).
 drop policy if exists "read media on accessible memories" on public.memory_media;
@@ -45,6 +48,27 @@ create policy "add media to accessible memories"
     with check (
         author_id = auth.uid()
         and memory_id in (
+            select id from public.memories where owner_id = auth.uid()
+            union
+            select memory_id from public.memory_shares where shared_with = auth.uid()
+        )
+    );
+
+-- Update media on any memory you can see (needed so the video upsert's
+-- ON CONFLICT DO UPDATE path is allowed by RLS).
+drop policy if exists "update media on accessible memories" on public.memory_media;
+create policy "update media on accessible memories"
+    on public.memory_media for update
+    to authenticated
+    using (
+        memory_id in (
+            select id from public.memories where owner_id = auth.uid()
+            union
+            select memory_id from public.memory_shares where shared_with = auth.uid()
+        )
+    )
+    with check (
+        memory_id in (
             select id from public.memories where owner_id = auth.uid()
             union
             select memory_id from public.memory_shares where shared_with = auth.uid()
