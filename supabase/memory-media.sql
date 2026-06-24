@@ -19,6 +19,11 @@ create index if not exists memory_media_memory_idx on public.memory_media (memor
 
 alter table public.memory_media enable row level security;
 
+-- Base table privileges. RLS controls WHICH rows a role can touch, but the role
+-- still needs table-level grants to touch the table at all. Without this you get
+-- "permission denied for table memory_media" (42501) even with correct policies.
+grant select, insert, delete on public.memory_media to authenticated;
+
 -- Read media on any memory you can see (own or shared-with-you).
 drop policy if exists "read media on accessible memories" on public.memory_media;
 create policy "read media on accessible memories"

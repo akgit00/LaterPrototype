@@ -14,6 +14,11 @@ create table if not exists public.memory_playlists (
 
 alter table public.memory_playlists enable row level security;
 
+-- Base table privileges. RLS controls WHICH rows a role can touch, but the role
+-- still needs table-level grants to touch the table at all. Without this you get
+-- "permission denied for table memory_playlists" (42501) even with correct policies.
+grant select, insert, update, delete on public.memory_playlists to authenticated;
+
 -- Read the playlist on any memory you can see (own or shared-with-you).
 drop policy if exists "read playlist on accessible memories" on public.memory_playlists;
 create policy "read playlist on accessible memories"

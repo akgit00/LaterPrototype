@@ -170,6 +170,7 @@ final class LaterViewModel {
             await loadComments()
             await loadMedia()
             await loadPlaylists()
+            await loadSongs()
         } catch {
             syncError = error.localizedDescription
         }
@@ -248,6 +249,31 @@ final class LaterViewModel {
                     comments.append(comment)
                 }
                 memories[index].comments = comments.sorted { $0.date < $1.date }
+            }
+            persist()
+        } catch {
+            syncError = error.localizedDescription
+        }
+    }
+
+    /// Pulls individual songs for every visible memory from the dedicated songs
+    /// table and merges them in, so the owner and shared connections all see the
+    /// same songs — no matter who added them.
+    @MainActor
+    private func loadSongs() async {
+        guard SupabaseREST.hasSession else { return }
+        let ids = memories.map { $0.id }
+        guard !ids.isEmpty else { return }
+        do {
+            let rows = try await SongService.fetch(memoryIDs: ids)
+            let grouped = Dictionary(grouping: rows, by: { $0.memory_id })
+            for index in memories.indices {
+                let songRows = grouped[memories[index].id] ?? []
+                var songs = memories[index].songs
+                for row in songRows where !songs.contains(where: { $0.id == row.id }) {
+                    songs.append(row.payload)
+                }
+                memories[index].songs = songs
             }
             persist()
         } catch {
@@ -496,7 +522,10 @@ final class LaterViewModel {
         guard !memories[index].songs.contains(where: { $0.id == song.id }) else { return }
         memories[index].songs.append(song)
         persist()
-        Task { await pushMemory(memoryID) }
+        Task {
+            try? await SongService.post(memoryID: memoryID, song: song)
+            if isOwned(memoryID) { await pushMemory(memoryID) }
+        }
     }
 
     /// Removes an individual song from a memory.
@@ -504,7 +533,10 @@ final class LaterViewModel {
         guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
         memories[index].songs.removeAll { $0.id == song.id }
         persist()
-        Task { await pushMemory(memoryID) }
+        Task {
+            try? await SongService.delete(id: song.id)
+            if isOwned(memoryID) { await pushMemory(memoryID) }
+        }
     }
 
     /// Removes the linked playlist from a memory for everyone on it.
