@@ -11,6 +11,7 @@ struct ProfileView: View {
     @State private var showAddConnection = false
     @State private var selectedMemoryID: UUID?
     @State private var chatFriend: Connection?
+    @State private var capsuleCount: Int = 0
 
     private static let defaultBio = "Collecting moments across time & space"
 
@@ -76,6 +77,9 @@ struct ProfileView: View {
                 }
             }
             .navigationTitle("Profile")
+            .onAppear {
+                capsuleCount = CapsuleStore.load()?.count ?? 0
+            }
             .toolbar {
                 if selectedSegment == .connections {
                     ToolbarItem(placement: .topBarLeading) {
@@ -206,7 +210,7 @@ struct ProfileView: View {
         HStack(spacing: 0) {
             statItem(value: "\(viewModel.memories.count)", label: "Memories")
             Divider().frame(height: 32)
-            statItem(value: "12", label: "Capsules")
+            statItem(value: "\(capsuleCount)", label: "Capsules")
             Divider().frame(height: 32)
             statItem(value: "\(viewModel.allConnections.count)", label: "Connections")
             Divider().frame(height: 32)
@@ -394,7 +398,10 @@ struct ProfileView: View {
                 ForEach(viewModel.allConnections) { connection in
                     let sharedCount = viewModel.memories.filter { $0.connections.contains(where: { $0.id == connection.id }) }.count
 
+                    let unread = viewModel.unreadByFriend[connection.id] ?? 0
+
                     Button {
+                        viewModel.markConversationRead(with: connection)
                         chatFriend = connection
                     } label: {
                         HStack(spacing: 12) {
@@ -411,9 +418,21 @@ struct ProfileView: View {
 
                             Spacer()
 
-                            Image(systemName: "message.fill")
-                                .font(.body)
-                                .foregroundStyle(.blue)
+                            ZStack(alignment: .topTrailing) {
+                                Image(systemName: "message.fill")
+                                    .font(.body)
+                                    .foregroundStyle(.blue)
+
+                                if unread > 0 {
+                                    Text(unread > 99 ? "99+" : "\(unread)")
+                                        .font(.system(size: 12, weight: .bold))
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 5)
+                                        .frame(minWidth: 18, minHeight: 18)
+                                        .background(Color.red, in: .capsule)
+                                        .offset(x: 11, y: -11)
+                                }
+                            }
                         }
                         .contentShape(.rect)
                         .padding(.horizontal, 16)

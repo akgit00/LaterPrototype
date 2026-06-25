@@ -16,7 +16,7 @@ struct EmailAuthView: View {
         case enterCode
     }
 
-    @State private var mode: Mode = .password
+    @State private var mode: Mode = .code
     @State private var step: Step = .enterEmail
     @State private var isSignUp = false
     @State private var email = ""

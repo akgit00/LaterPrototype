@@ -20,6 +20,7 @@ struct ContentView: View {
             Tab("Profile", systemImage: "person.crop.circle", value: 2) {
                 ProfileView(viewModel: viewModel)
             }
+            .badge(viewModel.totalUnread)
         }
         .tint(.blue)
         .task(id: auth.user?.id) {
@@ -36,10 +37,11 @@ struct ContentView: View {
             guard auth.user != nil else { return }
             var tick = 0
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(5))
+                try? await Task.sleep(for: .seconds(3))
                 if Task.isCancelled { break }
                 tick += 1
-                if tick % 3 == 0 {
+                await viewModel.loadUnreadCounts()
+                if tick % 4 == 0 {
                     await viewModel.refresh()
                 } else {
                     await viewModel.loadConnections()

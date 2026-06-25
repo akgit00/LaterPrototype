@@ -13,6 +13,11 @@ final class LaterViewModel {
 
     var allConnections: [Connection] = []
 
+    /// Unread message count per friend (by connection id), used to drive the
+    /// badges next to each conversation and the tab badge. Computed against a
+    /// per-conversation last-read timestamp stored locally on this device.
+    var unreadByFriend: [UUID: Int] = [:]
+
     /// Connection (friends) state.
     var incomingRequests: [FriendRequest] = []
     var outgoingRequests: [FriendRequest] = []
@@ -36,6 +41,7 @@ final class LaterViewModel {
     private(set) var ownedMemoryIDs: Set<UUID> = []
 
     private let lastUserKey = "cloud_last_user_id"
+    private let lastReadPrefix = "msg_last_read_"
 
     /// Optimistic comments that have been shown locally but not yet confirmed by
     /// the server, keyed by memory id. Kept so a background poll landing in the
@@ -761,6 +767,45 @@ final class LaterViewModel {
         } catch {
             syncError = error.localizedDescription
             return nil
+        }
+    }
+
+    /// Total number of unread messages across all conversations.
+    var totalUnread: Int {
+        unreadByFriend.values.reduce(0, +)
+    }
+
+    private func lastRead(for friendID: UUID) -> Date {
+        let stored = UserDefaults.standard.double(forKey: lastReadPrefix + friendID.uuidString)
+        return stored > 0 ? Date(timeIntervalSince1970: stored) : .distantPast
+    }
+
+    /// Marks a conversation as read up to now, clearing its unread badge.
+    @MainActor
+    func markConversationRead(with friend: Connection) {
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: lastReadPrefix + friend.id.uuidString)
+        if unreadByFriend[friend.id] != nil {
+            unreadByFriend[friend.id] = 0
+        }
+    }
+
+    /// Recomputes how many messages from each friend have arrived since the last
+    /// time the signed-in user opened that conversation on this device.
+    @MainActor
+    func loadUnreadCounts() async {
+        guard let userID = currentUserID, SupabaseREST.hasSession else { return }
+        do {
+            let rows = try await MessageService.received(currentUserID: userID)
+            var counts: [UUID: Int] = [:]
+            for row in rows {
+                guard let senderUUID = UUID(uuidString: row.sender_id) else { continue }
+                if row.created_at > lastRead(for: senderUUID) {
+                    counts[senderUUID, default: 0] += 1
+                }
+            }
+            unreadByFriend = counts
+        } catch {
+            // Non-fatal: leave the previous counts in place on a transient failure.
         }
     }
 

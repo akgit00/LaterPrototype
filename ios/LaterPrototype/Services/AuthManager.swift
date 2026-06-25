@@ -175,9 +175,11 @@ class AuthManager {
         defer { isSigningIn = false }
 
         do {
-            let (data, http) = try await postRaw(
+            // `create_user` must be a real JSON boolean — sending it as the
+            // string "true" makes GoTrue reject the request with a 400.
+            let (data, http) = try await postJSON(
                 url: url,
-                body: ["email": email, "create_user": "true"]
+                json: ["email": email, "create_user": true]
             )
             guard http.statusCode == 200 else {
                 throw decodeError(from: data, statusCode: http.statusCode)
@@ -367,6 +369,23 @@ class AuthManager {
         request.setValue(anonKey, forHTTPHeaderField: "apikey")
         request.setValue("Bearer \(anonKey)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONEncoder().encode(body)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw AuthError.serverError(statusCode: -1)
+        }
+        return (data, http)
+    }
+
+    /// POSTs an arbitrary JSON object (preserving value types such as Bool)
+    /// to a Supabase auth endpoint and returns the raw response.
+    private func postJSON(url: URL, json: [String: Any]) async throws -> (Data, HTTPURLResponse) {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(anonKey, forHTTPHeaderField: "apikey")
+        request.setValue("Bearer \(anonKey)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: json)
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else {

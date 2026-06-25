@@ -27,6 +27,10 @@ struct ChatView: View {
             }
         }
         .task { await load() }
+        // Keep the conversation live: poll for new messages every couple of
+        // seconds while the chat is open so the other person's replies appear
+        // without pulling to refresh.
+        .task(id: friend.id) { await pollLoop() }
     }
 
     private var conversation: some View {
@@ -118,6 +122,28 @@ struct ChatView: View {
         isLoading = true
         messages = await viewModel.loadConversation(with: friend)
         isLoading = false
+        viewModel.markConversationRead(with: friend)
+    }
+
+    /// Repeatedly pulls the conversation so incoming messages show up almost
+    /// instantly. New rows are merged in by id, so an in-flight send is never
+    /// lost and existing bubbles don't flicker.
+    private func pollLoop() async {
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(2))
+            if Task.isCancelled { break }
+            let latest = await viewModel.loadConversation(with: friend)
+            guard !latest.isEmpty else { continue }
+            var byID = Dictionary(messages.map { ($0.id, $0) }, uniquingKeysWith: { current, _ in current })
+            for message in latest { byID[message.id] = message }
+            let merged = byID.values.sorted { $0.date < $1.date }
+            if merged.map(\.id) != messages.map(\.id) {
+                messages = merged
+                // The chat is open and on-screen, so anything that just arrived
+                // is effectively read — keep its badge from reappearing.
+                viewModel.markConversationRead(with: friend)
+            }
+        }
     }
 
     private func send() async {
