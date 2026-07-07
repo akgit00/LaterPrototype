@@ -175,15 +175,12 @@ struct ProfileView: View {
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 32)
 
-                if let email = auth.user?.email, !email.isEmpty {
-                    HStack(spacing: 4) {
-                        Image(systemName: "envelope.fill")
-                            .font(.caption2)
-                        Text(email)
-                            .font(.caption)
-                    }
-                    .foregroundStyle(.tertiary)
-                    .padding(.top, 2)
+                // Email is intentionally not displayed anywhere for privacy.
+                if let username = viewModel.currentUsername {
+                    Text("@\(username)")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.tertiary)
+                        .padding(.top, 2)
                 }
             }
 
@@ -263,7 +260,7 @@ struct ProfileView: View {
                                 Text(memory.title)
                                     .font(.subheadline.weight(.semibold))
                                     .foregroundStyle(.primary)
-                                Text("\(memory.connections.count) friends, \(memory.photoURLs.count) photos")
+                                Text(timelineSummary(for: memory))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -483,6 +480,18 @@ struct ProfileView: View {
             .padding(.top, 8)
         }
         .padding(.vertical, 24)
+    }
+
+    /// One-line stats for a timeline row: live people, photo and video counts.
+    private func timelineSummary(for memory: Memory) -> String {
+        var parts: [String] = []
+        let people = memory.connections.count
+        parts.append("\(people) \(people == 1 ? "person" : "people")")
+        parts.append("\(memory.photoURLs.count) \(memory.photoURLs.count == 1 ? "photo" : "photos")")
+        if !memory.videos.isEmpty {
+            parts.append("\(memory.videos.count) \(memory.videos.count == 1 ? "video" : "videos")")
+        }
+        return parts.joined(separator: " \u{00B7} ")
     }
 
     private func shortDate(_ date: Date) -> String {
