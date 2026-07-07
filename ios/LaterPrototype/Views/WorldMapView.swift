@@ -12,9 +12,13 @@ struct WorldMapView: View {
     @State private var selectedMemoryID: UUID?
     @State private var showCreateMemory: Bool = false
 
+    private var location: LocationService { .shared }
+
     var body: some View {
         ZStack(alignment: .bottom) {
             Map(position: $position) {
+                UserAnnotation()
+
                 ForEach(viewModel.memories) { memory in
                     Annotation(memory.title, coordinate: memory.centerCoordinate) {
                         Button {
@@ -31,15 +35,28 @@ struct WorldMapView: View {
             VStack(spacing: 0) {
                 HStack {
                     Spacer()
-                    Button {
-                        showCreateMemory = true
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(.title3.weight(.semibold))
-                            .foregroundStyle(.white)
-                            .frame(width: 44, height: 44)
-                            .background(.ultraThinMaterial, in: Circle())
-                            .shadow(color: .black.opacity(0.3), radius: 8, x: 0, y: 4)
+                    VStack(spacing: 10) {
+                        Button {
+                            centerOnMyLocation()
+                        } label: {
+                            Image(systemName: "location.fill")
+                                .font(.body.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 44, height: 44)
+                                .background(.ultraThinMaterial, in: Circle())
+                                .shadow(color: .black.opacity(0.3), radius: 8, x: 0, y: 4)
+                        }
+
+                        Button {
+                            showCreateMemory = true
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.title3.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 44, height: 44)
+                                .background(.ultraThinMaterial, in: Circle())
+                                .shadow(color: .black.opacity(0.3), radius: 8, x: 0, y: 4)
+                        }
                     }
                     .padding(.trailing, 16)
                     .padding(.bottom, 8)
@@ -70,6 +87,26 @@ struct WorldMapView: View {
         .sheet(isPresented: $showCreateMemory) {
             CreateMemoryView(viewModel: viewModel)
                 .presentationDetents([.large])
+        }
+        .onAppear {
+            location.requestLocation()
+        }
+        .onChange(of: location.currentCoordinate?.latitude) { old, new in
+            // First fix after granting permission: gently fly to the user.
+            if old == nil, new != nil {
+                centerOnMyLocation()
+            }
+        }
+    }
+
+    private func centerOnMyLocation() {
+        location.requestLocation()
+        guard let coordinate = location.currentCoordinate else { return }
+        withAnimation(.spring(duration: 0.8)) {
+            position = .region(MKCoordinateRegion(
+                center: coordinate,
+                span: MKCoordinateSpan(latitudeDelta: 0.1, longitudeDelta: 0.1)
+            ))
         }
     }
 }

@@ -20,6 +20,8 @@ struct CreateMemoryView: View {
     @State private var currentStep: Int = 0
     @State private var isSearching: Bool = false
 
+    private var location: LocationService { .shared }
+
     init(viewModel: LaterViewModel, initialCoordinate: CLLocationCoordinate2D? = nil) {
         self.viewModel = viewModel
         self.initialCoordinate = initialCoordinate
@@ -181,33 +183,61 @@ struct CreateMemoryView: View {
             }
 
             ZStack {
-                Map(position: $mapPosition, interactionModes: [.pan, .zoom]) {
-                    if let coord = pinCoordinate {
-                        Annotation("", coordinate: coord) {
-                            VStack(spacing: 0) {
-                                Image(systemName: "mappin.circle.fill")
-                                    .font(.system(size: 32))
-                                    .foregroundStyle(.red)
-                                    .shadow(color: .black.opacity(0.3), radius: 4)
+                MapReader { reader in
+                    Map(position: $mapPosition, interactionModes: [.pan, .zoom]) {
+                        UserAnnotation()
 
-                                Image(systemName: "triangle.fill")
-                                    .font(.system(size: 8))
-                                    .foregroundStyle(.red)
-                                    .rotationEffect(.degrees(180))
-                                    .offset(y: -3)
+                        if let coord = pinCoordinate {
+                            Annotation("", coordinate: coord) {
+                                VStack(spacing: 0) {
+                                    Image(systemName: "mappin.circle.fill")
+                                        .font(.system(size: 32))
+                                        .foregroundStyle(.red)
+                                        .shadow(color: .black.opacity(0.3), radius: 4)
+
+                                    Image(systemName: "triangle.fill")
+                                        .font(.system(size: 8))
+                                        .foregroundStyle(.red)
+                                        .rotationEffect(.degrees(180))
+                                        .offset(y: -3)
+                                }
                             }
                         }
                     }
+                    .mapStyle(.standard(elevation: .realistic))
+                    .onTapGesture { tapLocation in
+                        // Tap anywhere on the map to drop / move the memory pin.
+                        if let coordinate = reader.convert(tapLocation, from: .local) {
+                            withAnimation(.spring(duration: 0.3)) {
+                                pinCoordinate = coordinate
+                            }
+                            searchResults = []
+                        }
+                    }
                 }
-                .mapStyle(.standard(elevation: .realistic))
                 .clipShape(.rect(cornerRadius: 16))
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
 
-                if pinCoordinate == nil {
-                    VStack {
+                VStack {
+                    HStack {
                         Spacer()
-                        Text("Search for a location or tap Next to place a pin")
+                        Button {
+                            useMyLocation()
+                        } label: {
+                            Image(systemName: "location.fill")
+                                .font(.body.weight(.semibold))
+                                .foregroundStyle(.blue)
+                                .frame(width: 40, height: 40)
+                                .background(.regularMaterial, in: Circle())
+                                .shadow(color: .black.opacity(0.15), radius: 6, x: 0, y: 3)
+                        }
+                        .padding(.trailing, 28)
+                        .padding(.top, 20)
+                    }
+                    Spacer()
+                    if pinCoordinate == nil {
+                        Text("Tap the map to drop a pin, search a place, or use your location")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 16)
@@ -218,6 +248,22 @@ struct CreateMemoryView: View {
                 }
             }
             .padding(.bottom, 8)
+        }
+        .onAppear {
+            location.requestLocation()
+        }
+    }
+
+    /// Drops the pin at the user's current location and flies the map there.
+    private func useMyLocation() {
+        location.requestLocation()
+        guard let coordinate = location.currentCoordinate else { return }
+        pinCoordinate = coordinate
+        withAnimation(.spring(duration: 0.6)) {
+            mapPosition = .region(MKCoordinateRegion(
+                center: coordinate,
+                span: MKCoordinateSpan(latitudeDelta: 0.02, longitudeDelta: 0.02)
+            ))
         }
     }
 
@@ -478,9 +524,26 @@ struct ConnectionAvatarView: View {
             )
             .frame(width: size, height: size)
             .overlay {
-                Text(String(connection.username.prefix(1)).uppercased())
-                    .font(.system(size: size * 0.4, weight: .bold))
-                    .foregroundStyle(.white)
+                if let avatar = connection.avatarURL, let url = URL(string: avatar) {
+                    AsyncImage(url: url) { phase in
+                        if let image = phase.image {
+                            image
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                        } else {
+                            initialText
+                        }
+                    }
+                } else {
+                    initialText
+                }
             }
+            .clipShape(.circle)
+    }
+
+    private var initialText: some View {
+        Text(String(connection.username.prefix(1)).uppercased())
+            .font(.system(size: size * 0.4, weight: .bold))
+            .foregroundStyle(.white)
     }
 }
