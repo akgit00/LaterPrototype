@@ -147,7 +147,8 @@ nonisolated enum CloudMemoryService {
         return try? await SupabaseREST.uploadMedia(data, path: path, contentType: "image/jpeg")
     }
 
-    /// Looks up a friend by exact `@username` or email address.
+    /// Looks up a friend by `@username` or email address, case-insensitively,
+    /// so "JohnDoe" finds "@johndoe" no matter how it was typed.
     static func findProfile(identifier rawIdentifier: String) async throws -> CloudProfile? {
         var identifier = rawIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if identifier.hasPrefix("@") { identifier.removeFirst() }
@@ -157,8 +158,8 @@ nonisolated enum CloudMemoryService {
             path: "profiles",
             method: "GET",
             query: [
-                URLQueryItem(name: "or", value: "(username.eq.\(identifier),email.eq.\(identifier))"),
-                URLQueryItem(name: "select", value: "id,username,display_name,email"),
+                URLQueryItem(name: "or", value: "(username.ilike.\(identifier),email.ilike.\(identifier))"),
+                URLQueryItem(name: "select", value: "id,username,display_name,email,avatar_url"),
                 URLQueryItem(name: "limit", value: "1"),
             ]
         )
@@ -200,6 +201,28 @@ nonisolated enum CloudMemoryService {
     }
 
     // MARK: - Shares
+
+    /// A share row as read back from the `memory_shares` table.
+    nonisolated struct ShareReadRow: Codable, Sendable {
+        let memory_id: UUID
+        let shared_with: String
+    }
+
+    /// Fetches the share rows for the given memories, so every participant can
+    /// see the full, live people list.
+    static func fetchShares(memoryIDs: [UUID]) async throws -> [ShareReadRow] {
+        guard !memoryIDs.isEmpty else { return [] }
+        let ids = memoryIDs.map { $0.uuidString }.joined(separator: ",")
+        let data = try await SupabaseREST.request(
+            path: "memory_shares",
+            method: "GET",
+            query: [
+                URLQueryItem(name: "select", value: "memory_id,shared_with"),
+                URLQueryItem(name: "memory_id", value: "in.(\(ids))"),
+            ]
+        )
+        return try SupabaseREST.makeDecoder().decode([ShareReadRow].self, from: data)
+    }
 
     static func shareMemory(memoryID: UUID, ownerID: String, sharedWith: String) async throws {
         let row = ShareRow(memory_id: memoryID, owner_id: ownerID, shared_with: sharedWith)
