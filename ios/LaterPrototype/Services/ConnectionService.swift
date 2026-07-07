@@ -79,7 +79,7 @@ nonisolated enum ConnectionService {
             method: "GET",
             query: [
                 URLQueryItem(name: "id", value: "in.(\(list))"),
-                URLQueryItem(name: "select", value: "id,username,display_name,email"),
+                URLQueryItem(name: "select", value: "id,username,display_name,email,avatar_url"),
             ]
         )
         return try SupabaseREST.makeDecoder().decode([CloudProfile].self, from: data)
