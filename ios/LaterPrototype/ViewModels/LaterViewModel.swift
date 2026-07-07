@@ -39,6 +39,8 @@ final class LaterViewModel {
     private var currentDisplayName: String?
     /// Memory ids owned by the current user (vs shared with them by friends).
     private(set) var ownedMemoryIDs: Set<UUID> = []
+    /// Owner id for every visible memory, so guests can record shares correctly.
+    private var ownerByMemoryID: [UUID: String] = [:]
 
     private let lastUserKey = "cloud_last_user_id"
     private let lastReadPrefix = "msg_last_read_"
@@ -156,6 +158,7 @@ final class LaterViewModel {
         do {
             let rows = try await CloudMemoryService.fetchMemories()
             ownedMemoryIDs = Set(rows.filter { $0.owner_id == userID }.map { $0.id })
+            ownerByMemoryID = Dictionary(rows.map { ($0.id, $0.owner_id) }, uniquingKeysWith: { first, _ in first })
             // Cloud payloads carry a stale/empty comments array (comments live in
             // their own table). Carry over the comments we already have in memory
             // so a poll never blanks a just-posted comment before loadComments runs.
@@ -163,22 +166,125 @@ final class LaterViewModel {
                 memories.map { ($0.id, $0.comments) },
                 uniquingKeysWith: { first, _ in first }
             )
-            memories = rows
+            var updated = rows
                 .map { $0.payload }
                 .sorted { $0.date > $1.date }
-            for index in memories.indices {
-                if let carried = existingComments[memories[index].id] {
-                    memories[index].comments = carried
+            for index in updated.indices {
+                if let carried = existingComments[updated[index].id] {
+                    updated[index].comments = carried
                 }
+                Self.stripUnreadableLocalMedia(from: &updated[index])
             }
-            rebuildGlobalPins()
-            persist()
+            // Only touch published state when something actually changed, so the
+            // periodic poll never causes visible flicker / button glitches.
+            if updated != memories {
+                memories = updated
+                rebuildGlobalPins()
+                persist()
+            }
+            await loadShares()
             await loadComments()
             await loadMedia()
             await loadPlaylists()
             await loadSongs()
         } catch {
             syncError = error.localizedDescription
+        }
+    }
+
+    /// Removes photo / video references that point at local files on ANOTHER
+    /// device (they can never be displayed here). The shared, uploaded copies
+    /// are merged back in from the cloud media table by `loadMedia`.
+    nonisolated private static func stripUnreadableLocalMedia(from memory: inout Memory) {
+        func isUnreadable(_ urlString: String) -> Bool {
+            guard let url = URL(string: urlString), url.isFileURL else { return false }
+            return !FileManager.default.fileExists(atPath: url.path)
+        }
+
+        memory.photoURLs.removeAll { isUnreadable($0) }
+        memory.pins = memory.pins.map { pin in
+            guard let imageURL = pin.imageURL, isUnreadable(imageURL) else { return pin }
+            return MemoryPin(
+                id: pin.id,
+                coordinate: pin.coordinate,
+                title: pin.title,
+                date: pin.date,
+                imageURL: nil,
+                intensity: pin.intensity
+            )
+        }
+        memory.videos = memory.videos.compactMap { video in
+            let videoUnreadable = video.videoURL.map(isUnreadable) ?? true
+            let thumbUnreadable = isUnreadable(video.thumbnailURL)
+            if videoUnreadable && thumbUnreadable { return nil }
+            guard videoUnreadable else { return video }
+            return VideoAttachment(
+                id: video.id,
+                thumbnailURL: video.thumbnailURL,
+                title: video.title,
+                duration: video.duration,
+                videoURL: nil
+            )
+        }
+    }
+
+    /// Pulls the share list for every visible memory and merges the recipients
+    /// into each memory's people list, so the number of people stays accurate
+    /// for everyone — including people added by someone other than the owner.
+    @MainActor
+    private func loadShares() async {
+        guard let userID = currentUserID, SupabaseREST.hasSession else { return }
+        let ids = memories.map { $0.id }
+        guard !ids.isEmpty else { return }
+        do {
+            let rows = try await CloudMemoryService.fetchShares(memoryIDs: ids)
+            guard !rows.isEmpty else { return }
+            let profiles = try await ConnectionService.profiles(ids: Array(Set(rows.map { $0.shared_with })))
+            var profileByUUID: [UUID: CloudProfile] = [:]
+            for profile in profiles {
+                if let uuid = UUID(uuidString: profile.id) { profileByUUID[uuid] = profile }
+            }
+            let grouped = Dictionary(grouping: rows, by: { $0.memory_id })
+            var changed = false
+            for index in memories.indices {
+                var connections = memories[index].connections
+                // Refresh names / avatars of people we already list.
+                connections = connections.map { existing in
+                    guard let profile = profileByUUID[existing.id] else { return existing }
+                    let name = profile.display_name?.isEmpty == false ? profile.display_name! : profile.username
+                    return Connection(
+                        id: existing.id,
+                        username: profile.username,
+                        displayName: name,
+                        avatarColor: existing.avatarColor,
+                        avatarURL: profile.avatar_url
+                    )
+                }
+                // Merge in share recipients missing from the payload.
+                for row in grouped[memories[index].id] ?? [] {
+                    guard let uuid = UUID(uuidString: row.shared_with),
+                          row.shared_with != userID,
+                          !connections.contains(where: { $0.id == uuid }),
+                          let profile = profileByUUID[uuid] else { continue }
+                    let name = profile.display_name?.isEmpty == false ? profile.display_name! : profile.username
+                    connections.append(
+                        Connection(
+                            id: uuid,
+                            username: profile.username,
+                            displayName: name,
+                            avatarColor: Self.color(for: profile.id),
+                            avatarURL: profile.avatar_url
+                        )
+                    )
+                }
+                if connections != memories[index].connections {
+                    memories[index].connections = connections
+                    changed = true
+                }
+            }
+            if changed { persist() }
+        } catch {
+            // Non-fatal: the payload's people list still renders.
         }
     }
 
@@ -193,6 +299,7 @@ final class LaterViewModel {
         do {
             let rows = try await MediaService.fetch(memoryIDs: ids)
             let grouped = Dictionary(grouping: rows, by: { $0.memory_id })
+            var changed = false
             for index in memories.indices {
                 let mediaRows = grouped[memories[index].id] ?? []
 
@@ -200,11 +307,26 @@ final class LaterViewModel {
                 for row in mediaRows where row.kind == "photo" {
                     if !photos.contains(row.url) { photos.append(row.url) }
                 }
-                memories[index].photoURLs = photos
+                if photos != memories[index].photoURLs {
+                    memories[index].photoURLs = photos
+                    changed = true
+                }
 
                 var videos = memories[index].videos
                 for row in mediaRows where row.kind == "video" {
-                    if !videos.contains(where: { $0.id == row.id || $0.videoURL == row.url }) {
+                    if let existing = videos.firstIndex(where: { $0.id == row.id }) {
+                        // Backfill a playable cloud URL onto a video whose local
+                        // file lives on another device.
+                        if videos[existing].videoURL == nil {
+                            videos[existing] = VideoAttachment(
+                                id: row.id,
+                                thumbnailURL: row.thumbnail_url ?? videos[existing].thumbnailURL,
+                                title: videos[existing].title,
+                                duration: row.duration ?? videos[existing].duration,
+                                videoURL: row.url
+                            )
+                        }
+                    } else if !videos.contains(where: { $0.videoURL == row.url }) {
                         videos.append(
                             VideoAttachment(
                                 id: row.id,
@@ -216,9 +338,12 @@ final class LaterViewModel {
                         )
                     }
                 }
-                memories[index].videos = videos
+                if videos != memories[index].videos {
+                    memories[index].videos = videos
+                    changed = true
+                }
             }
-            persist()
+            if changed { persist() }
         } catch {
             syncError = error.localizedDescription
         }
@@ -235,6 +360,7 @@ final class LaterViewModel {
         do {
             let rows = try await CommentService.fetch(memoryIDs: ids)
             let grouped = Dictionary(grouping: rows, by: { $0.memory_id })
+            var changed = false
             for index in memories.indices {
                 let memoryID = memories[index].id
                 var comments = (grouped[memoryID] ?? []).map {
@@ -254,9 +380,13 @@ final class LaterViewModel {
                 where !comments.contains(where: { $0.id == comment.id }) {
                     comments.append(comment)
                 }
-                memories[index].comments = comments.sorted { $0.date < $1.date }
+                let sorted = comments.sorted { $0.date < $1.date }
+                if sorted != memories[index].comments {
+                    memories[index].comments = sorted
+                    changed = true
+                }
             }
-            persist()
+            if changed { persist() }
         } catch {
             syncError = error.localizedDescription
         }
@@ -273,15 +403,19 @@ final class LaterViewModel {
         do {
             let rows = try await SongService.fetch(memoryIDs: ids)
             let grouped = Dictionary(grouping: rows, by: { $0.memory_id })
+            var changed = false
             for index in memories.indices {
                 let songRows = grouped[memories[index].id] ?? []
                 var songs = memories[index].songs
                 for row in songRows where !songs.contains(where: { $0.id == row.id }) {
                     songs.append(row.payload)
                 }
-                memories[index].songs = songs
+                if songs != memories[index].songs {
+                    memories[index].songs = songs
+                    changed = true
+                }
             }
-            persist()
+            if changed { persist() }
         } catch {
             syncError = error.localizedDescription
         }
@@ -298,12 +432,14 @@ final class LaterViewModel {
         do {
             let rows = try await PlaylistService.fetch(memoryIDs: ids)
             let byMemory = Dictionary(rows.map { ($0.memory_id, $0.payload) }, uniquingKeysWith: { first, _ in first })
+            var changed = false
             for index in memories.indices {
-                if let playlist = byMemory[memories[index].id] {
+                if let playlist = byMemory[memories[index].id], playlist != memories[index].playlist {
                     memories[index].playlist = playlist
+                    changed = true
                 }
             }
-            persist()
+            if changed { persist() }
         } catch {
             syncError = error.localizedDescription
         }
@@ -311,6 +447,11 @@ final class LaterViewModel {
 
     private func isOwned(_ memoryID: UUID) -> Bool {
         currentUserID != nil && ownedMemoryIDs.contains(memoryID)
+    }
+
+    /// Whether the signed-in user created (owns) the given memory.
+    func isOwner(of memoryID: UUID) -> Bool {
+        isOwned(memoryID)
     }
 
     /// Uploads any local media then upserts an owned memory to the cloud.
@@ -347,6 +488,65 @@ final class LaterViewModel {
         rebuildGlobalPins()
         persist()
         Task { await pushMemory(memory.id) }
+    }
+
+    /// Edits a memory's core details (title, description, date, location).
+    /// Only the owner can do this; changes sync to everyone it's shared with.
+    func updateMemoryDetails(
+        memoryID: UUID,
+        title: String,
+        subtitle: String,
+        date: Date,
+        coordinate: CLLocationCoordinate2D?
+    ) {
+        guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        var memory = memories[index]
+        memory.title = title
+        memory.subtitle = subtitle
+        memory.date = date
+        if let coordinate {
+            let movedFromCenter = memory.centerCoordinate.latitude != coordinate.latitude
+                || memory.centerCoordinate.longitude != coordinate.longitude
+            memory.centerCoordinate = coordinate
+            // A single-pin memory keeps its pin anchored to the memory location.
+            if movedFromCenter && memory.pins.count == 1 {
+                let pin = memory.pins[0]
+                memory.pins = [
+                    MemoryPin(
+                        id: pin.id,
+                        coordinate: coordinate,
+                        title: title,
+                        date: date,
+                        imageURL: pin.imageURL,
+                        intensity: pin.intensity
+                    )
+                ]
+            }
+        }
+        // Keep pin labels in sync with the new title.
+        memory.pins = memory.pins.map {
+            MemoryPin(
+                id: $0.id,
+                coordinate: $0.coordinate,
+                title: title,
+                date: $0.date,
+                imageURL: $0.imageURL,
+                intensity: $0.intensity
+            )
+        }
+        memories[index] = memory
+        rebuildGlobalPins()
+        persist()
+        Task { await pushMemory(memoryID) }
+    }
+
+    /// Owner-only toggle: lets everyone a memory is shared with add more people.
+    func setGuestInvites(for memoryID: UUID, allowed: Bool) {
+        guard isOwned(memoryID),
+              let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        memories[index].allowsGuestInvites = allowed
+        persist()
+        Task { await pushMemory(memoryID) }
     }
 
     func deleteMemory(_ id: UUID) {
@@ -411,7 +611,13 @@ final class LaterViewModel {
         guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
 
         commentError = nil
-        let name = currentUsername ?? "You"
+        // The username may not be resolved yet right after launch — fetch it so
+        // comments are never posted under a placeholder name.
+        if currentUsername == nil, let userID = currentUserID, SupabaseREST.hasSession {
+            currentUsername = ((try? await CloudMemoryService.fetchProfile(id: userID)) ?? nil)?.username
+        }
+        let emailFallback = currentEmail.split(separator: "@").first.map(String.init)
+        let name = currentUsername ?? emailFallback ?? "You"
         // Optimistically show the comment immediately, and track it as pending so
         // a concurrent poll can't wipe it before the server confirms.
         let local = Comment(username: name, text: trimmed)
@@ -586,14 +792,17 @@ final class LaterViewModel {
 
     // MARK: - Sharing
 
-    /// Shares an owned memory with a friend looked up by `@username` or email.
+    /// Shares a memory with a friend looked up by `@username` or email. The
+    /// owner can always do this; other people on the memory can too when the
+    /// owner has enabled guest invites.
     @MainActor
     func shareMemory(memoryID: UUID, identifier: String) async -> ShareResult {
         guard let userID = currentUserID, SupabaseREST.hasSession else {
             return .failure("You need to be signed in to share.")
         }
-        guard isOwned(memoryID) else {
-            return .failure("You can only share memories you created.")
+        let isOwnerShare = isOwned(memoryID)
+        guard isOwnerShare || memoryByID(memoryID)?.allowsGuestInvites == true else {
+            return .failure("The memory's creator hasn't allowed others to add people yet.")
         }
 
         do {
@@ -614,12 +823,14 @@ final class LaterViewModel {
                 id: friendUUID,
                 username: profile.username,
                 displayName: name,
-                avatarColor: ConnectionColor.allCases.randomElement() ?? .blue
+                avatarColor: Self.color(for: profile.id),
+                avatarURL: profile.avatar_url
             )
             addConnection(to: memoryID, connection: connection)
 
-            try await CloudMemoryService.shareMemory(memoryID: memoryID, ownerID: userID, sharedWith: profile.id)
-            await pushMemory(memoryID)
+            let ownerID = ownerByMemoryID[memoryID] ?? userID
+            try await CloudMemoryService.shareMemory(memoryID: memoryID, ownerID: ownerID, sharedWith: profile.id)
+            if isOwnerShare { await pushMemory(memoryID) }
             return .shared(displayName: name)
         } catch {
             return .failure(error.localizedDescription)
@@ -654,7 +865,8 @@ final class LaterViewModel {
                     id: otherUUID,
                     username: profile.username,
                     displayName: name,
-                    avatarColor: Self.color(for: profile.id)
+                    avatarColor: Self.color(for: profile.id),
+                    avatarURL: profile.avatar_url
                 )
                 if row.status == "accepted" {
                     friends.append(connection)

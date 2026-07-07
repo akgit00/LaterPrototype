@@ -54,7 +54,7 @@ nonisolated struct MemoryPin: Identifiable, Sendable, Hashable, Codable {
     }
 }
 
-nonisolated struct ChatMessage: Identifiable, Sendable, Codable {
+nonisolated struct ChatMessage: Identifiable, Sendable, Codable, Equatable {
     let id: UUID
     let time: String
     let username: String
@@ -68,13 +68,13 @@ nonisolated struct ChatMessage: Identifiable, Sendable, Codable {
     }
 }
 
-nonisolated struct MusicAttachment: Sendable, Codable {
+nonisolated struct MusicAttachment: Sendable, Codable, Equatable {
     let songTitle: String
     let artist: String
     let albumArtURL: String?
 }
 
-nonisolated struct PlaylistTrack: Identifiable, Sendable, Codable {
+nonisolated struct PlaylistTrack: Identifiable, Sendable, Codable, Equatable {
     let id: UUID
     let title: String
     let artist: String
@@ -93,7 +93,7 @@ nonisolated struct PlaylistTrack: Identifiable, Sendable, Codable {
     }
 }
 
-nonisolated struct PlaylistAttachment: Sendable, Codable {
+nonisolated struct PlaylistAttachment: Sendable, Codable, Equatable {
     let name: String
     let source: PlaylistSource
     let coverURL: String?
@@ -114,7 +114,7 @@ nonisolated enum PlaylistSource: String, Sendable, Codable {
     case appleMusic = "Apple Music"
 }
 
-nonisolated struct VideoAttachment: Identifiable, Sendable, Codable {
+nonisolated struct VideoAttachment: Identifiable, Sendable, Codable, Equatable {
     let id: UUID
     let thumbnailURL: String
     let title: String
@@ -131,7 +131,7 @@ nonisolated struct VideoAttachment: Identifiable, Sendable, Codable {
     }
 }
 
-nonisolated struct Comment: Identifiable, Sendable, Codable {
+nonisolated struct Comment: Identifiable, Sendable, Codable, Equatable {
     let id: UUID
     let username: String
     let text: String
@@ -150,16 +150,22 @@ nonisolated struct Connection: Identifiable, Sendable, Hashable, Codable {
     let username: String
     let displayName: String
     let avatarColor: ConnectionColor
+    /// Public profile picture URL, when the person has set one.
+    let avatarURL: String?
 
-    init(id: UUID = UUID(), username: String, displayName: String = "", avatarColor: ConnectionColor = .blue) {
+    init(id: UUID = UUID(), username: String, displayName: String = "", avatarColor: ConnectionColor = .blue, avatarURL: String? = nil) {
         self.id = id
         self.username = username
         self.displayName = displayName.isEmpty ? username : displayName
         self.avatarColor = avatarColor
+        self.avatarURL = avatarURL
     }
 
     nonisolated static func == (lhs: Connection, rhs: Connection) -> Bool {
         lhs.id == rhs.id
+            && lhs.username == rhs.username
+            && lhs.displayName == rhs.displayName
+            && lhs.avatarURL == rhs.avatarURL
     }
 
     nonisolated func hash(into hasher: inout Hasher) {
@@ -171,7 +177,7 @@ nonisolated enum ConnectionColor: String, CaseIterable, Sendable, Codable {
     case blue, purple, pink, orange, green, teal
 }
 
-nonisolated struct Memory: Identifiable, Sendable, Codable {
+nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
     let id: UUID
     var title: String
     var subtitle: String
@@ -188,6 +194,9 @@ nonisolated struct Memory: Identifiable, Sendable, Codable {
     var songs: [PlaylistTrack]
     var comments: [Comment]
     var connections: [Connection]
+    /// When true, the owner allows everyone the memory is shared with to add
+    /// more people to it.
+    var allowsGuestInvites: Bool
 
     init(
         id: UUID = UUID(),
@@ -205,7 +214,8 @@ nonisolated struct Memory: Identifiable, Sendable, Codable {
         playlist: PlaylistAttachment? = nil,
         songs: [PlaylistTrack] = [],
         comments: [Comment] = [],
-        connections: [Connection] = []
+        connections: [Connection] = [],
+        allowsGuestInvites: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -223,12 +233,34 @@ nonisolated struct Memory: Identifiable, Sendable, Codable {
         self.songs = songs
         self.comments = comments
         self.connections = connections
+        self.allowsGuestInvites = allowsGuestInvites
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, title, subtitle, date, creators
         case centerLatitude, centerLongitude, spanDelta
         case pins, photoURLs, videos, chatLog, music, playlist, songs, comments, connections
+        case allowsGuestInvites
+    }
+
+    nonisolated static func == (lhs: Memory, rhs: Memory) -> Bool {
+        lhs.id == rhs.id
+            && lhs.title == rhs.title
+            && lhs.subtitle == rhs.subtitle
+            && lhs.date == rhs.date
+            && lhs.creators == rhs.creators
+            && lhs.centerCoordinate.latitude == rhs.centerCoordinate.latitude
+            && lhs.centerCoordinate.longitude == rhs.centerCoordinate.longitude
+            && lhs.spanDelta == rhs.spanDelta
+            && lhs.pins == rhs.pins
+            && lhs.photoURLs == rhs.photoURLs
+            && lhs.videos == rhs.videos
+            && lhs.music == rhs.music
+            && lhs.playlist == rhs.playlist
+            && lhs.songs == rhs.songs
+            && lhs.comments == rhs.comments
+            && lhs.connections == rhs.connections
+            && lhs.allowsGuestInvites == rhs.allowsGuestInvites
     }
 
     nonisolated init(from decoder: Decoder) throws {
@@ -251,6 +283,7 @@ nonisolated struct Memory: Identifiable, Sendable, Codable {
         songs = try container.decodeIfPresent([PlaylistTrack].self, forKey: .songs) ?? []
         comments = try container.decode([Comment].self, forKey: .comments)
         connections = try container.decode([Connection].self, forKey: .connections)
+        allowsGuestInvites = try container.decodeIfPresent(Bool.self, forKey: .allowsGuestInvites) ?? false
     }
 
     nonisolated func encode(to encoder: Encoder) throws {
@@ -272,5 +305,6 @@ nonisolated struct Memory: Identifiable, Sendable, Codable {
         try container.encode(songs, forKey: .songs)
         try container.encode(comments, forKey: .comments)
         try container.encode(connections, forKey: .connections)
+        try container.encode(allowsGuestInvites, forKey: .allowsGuestInvites)
     }
 }
