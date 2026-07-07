@@ -360,6 +360,29 @@ final class SpotifyService: NSObject {
         )
     }
 
+    // MARK: - oEmbed (no sign-in required)
+
+    /// Minimal metadata Spotify exposes publicly for any shared link.
+    nonisolated struct OEmbedInfo: Codable, Sendable {
+        let title: String
+        let thumbnail_url: String?
+    }
+
+    /// Fetches a link's public title and cover art via Spotify's oEmbed
+    /// endpoint. Works without any Spotify account or API credentials, so a
+    /// pasted playlist link always resolves to its real name.
+    nonisolated static func fetchOEmbed(for urlString: String) async throws -> OEmbedInfo {
+        var components = URLComponents(string: "https://open.spotify.com/oembed")
+        components?.queryItems = [URLQueryItem(name: "url", value: urlString)]
+        guard let url = components?.url else { throw SpotifyError.invalidResponse }
+
+        let (data, response) = try await URLSession.shared.data(from: url)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw SpotifyError.invalidResponse
+        }
+        return try JSONDecoder().decode(OEmbedInfo.self, from: data)
+    }
+
     // MARK: - Helpers
 
     private static func formatDuration(_ ms: Int?) -> String {
