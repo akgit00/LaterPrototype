@@ -4,16 +4,24 @@ import PhotosUI
 import AVKit
 import UniformTypeIdentifiers
 
+/// Identifiable wrapper so the photo viewer opens reliably with the tapped
+/// photo (avoids the empty-sheet race of `isPresented` + optional index).
+struct PhotoViewerSelection: Identifiable {
+    let id = UUID()
+    let index: Int
+}
+
 struct MemoryRoomView: View {
     let memoryID: UUID
     let viewModel: LaterViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var mapPosition: MapCameraPosition
-    @State private var selectedPhotoIndex: Int?
-    @State private var showPhotoViewer: Bool = false
+    @State private var photoViewer: PhotoViewerSelection?
     @State private var selectedDetent: PresentationDetent = .fraction(0.45)
     @State private var showMediaSheet: Bool = true
     @State private var showAddPeopleSheet: Bool = false
+    @State private var showEditMemorySheet: Bool = false
+    @State private var addressPin: MemoryPin?
     @State private var playingVideoURL: URL?
     @State private var showDeleteMemoryConfirm: Bool = false
 
@@ -41,8 +49,7 @@ struct MemoryRoomView: View {
                         Annotation(pin.title, coordinate: pin.coordinate) {
                             Button {
                                 if let idx = memory.photoURLs.firstIndex(of: imageURL) {
-                                    selectedPhotoIndex = idx
-                                    showPhotoViewer = true
+                                    photoViewer = PhotoViewerSelection(index: idx)
                                 }
                             } label: {
                                 PhotoPinView(imageURL: imageURL, title: pin.title)
@@ -50,7 +57,11 @@ struct MemoryRoomView: View {
                         }
                     } else {
                         Annotation(pin.title, coordinate: pin.coordinate) {
-                            SmallPinView()
+                            Button {
+                                addressPin = pin
+                            } label: {
+                                SmallPinView()
+                            }
                         }
                     }
                 }
@@ -73,10 +84,11 @@ struct MemoryRoomView: View {
             MemoryMediaSheet(
                 memoryID: memoryID,
                 viewModel: viewModel,
-                selectedPhotoIndex: $selectedPhotoIndex,
-                showPhotoViewer: $showPhotoViewer,
+                photoViewer: $photoViewer,
                 playingVideoURL: $playingVideoURL,
-                showAddPeopleSheet: $showAddPeopleSheet
+                showAddPeopleSheet: $showAddPeopleSheet,
+                showEditMemorySheet: $showEditMemorySheet,
+                addressPin: $addressPin
             )
             .presentationDetents([.fraction(0.15), .fraction(0.45), .large], selection: $selectedDetent)
             .presentationDragIndicator(.visible)
@@ -120,6 +132,13 @@ struct MemoryRoomView: View {
                         showAddPeopleSheet = true
                     } label: {
                         Label("Share", systemImage: "square.and.arrow.up")
+                    }
+                    if viewModel.isOwner(of: memoryID) {
+                        Button {
+                            showEditMemorySheet = true
+                        } label: {
+                            Label("Edit Details", systemImage: "pencil")
+                        }
                     }
                     Button(role: .destructive) {
                         showDeleteMemoryConfirm = true
@@ -172,10 +191,11 @@ struct MemoryRoomView: View {
 struct MemoryMediaSheet: View {
     let memoryID: UUID
     let viewModel: LaterViewModel
-    @Binding var selectedPhotoIndex: Int?
-    @Binding var showPhotoViewer: Bool
+    @Binding var photoViewer: PhotoViewerSelection?
     @Binding var playingVideoURL: URL?
     @Binding var showAddPeopleSheet: Bool
+    @Binding var showEditMemorySheet: Bool
+    @Binding var addressPin: MemoryPin?
 
     @State private var selectedSection: MediaSection = .photos
     @State private var showAddPhotosPicker: Bool = false
@@ -183,6 +203,9 @@ struct MemoryMediaSheet: View {
     @State private var isImporting: Bool = false
     @State private var showAddPlaylistSheet: Bool = false
     @State private var showAddSongSheet: Bool = false
+    @State private var showVideoUnavailableAlert: Bool = false
+
+    private var previewPlayer: PreviewPlayerService { .shared }
 
     private var memory: Memory {
         viewModel.memoryByID(memoryID) ?? Memory(title: "", centerCoordinate: CLLocationCoordinate2D())
@@ -212,9 +235,7 @@ struct MemoryMediaSheet: View {
                     HStack(spacing: 8) {
                         ForEach(MediaSection.allCases, id: \.self) { section in
                             Button {
-                                withAnimation(.spring(duration: 0.3)) {
-                                    selectedSection = section
-                                }
+                                selectedSection = section
                             } label: {
                                 HStack(spacing: 5) {
                                     Image(systemName: iconFor(section))
@@ -278,13 +299,26 @@ struct MemoryMediaSheet: View {
             selectedPhotosItems = []
             Task { await importPickedItems(captured) }
         }
-        .sheet(isPresented: $showPhotoViewer) {
-            if let index = selectedPhotoIndex {
-                PhotoViewerSheet(photoURLs: memory.photoURLs, initialIndex: index)
-            }
+        .sheet(item: $photoViewer) { selection in
+            PhotoViewerSheet(photoURLs: memory.photoURLs, initialIndex: selection.index)
+        }
+        .sheet(item: $addressPin) { pin in
+            PinAddressSheet(pin: pin)
+                .presentationDetents([.fraction(0.4), .medium])
+        }
+        .sheet(isPresented: $showEditMemorySheet) {
+            EditMemorySheet(memoryID: memoryID, viewModel: viewModel)
         }
         .fullScreenCover(item: $playingVideoURL) { url in
             VideoPlayerView(url: url)
+        }
+        .alert("Video not ready", isPresented: $showVideoUnavailableAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("This video is still uploading from the person who added it. Try again in a moment.")
+        }
+        .onDisappear {
+            previewPlayer.stop()
         }
         .sheet(isPresented: $showAddPlaylistSheet) {
             AddPlaylistSheet(memoryID: memoryID, viewModel: viewModel)
@@ -395,8 +429,7 @@ struct MemoryMediaSheet: View {
 
                 ForEach(Array(memory.photoURLs.enumerated()), id: \.offset) { index, url in
                     Button {
-                        selectedPhotoIndex = index
-                        showPhotoViewer = true
+                        photoViewer = PhotoViewerSelection(index: index)
                     } label: {
                         Color(.secondarySystemBackground)
                             .aspectRatio(1, contentMode: .fill)
@@ -478,6 +511,8 @@ struct MemoryMediaSheet: View {
                             Button {
                                 if let urlString = video.videoURL, let url = URL(string: urlString) {
                                     playingVideoURL = url
+                                } else {
+                                    showVideoUnavailableAlert = true
                                 }
                             } label: {
                                 VideoThumbnailCard(video: video)
@@ -600,15 +635,7 @@ struct MemoryMediaSheet: View {
 
                         Spacer()
 
-                        if let urlString = song.externalURL, let url = URL(string: urlString) {
-                            Button {
-                                UIApplication.shared.open(url)
-                            } label: {
-                                Image(systemName: "play.circle.fill")
-                                    .font(.title2)
-                                    .foregroundStyle(.green)
-                            }
-                        }
+                        SongPreviewButton(track: song)
 
                         Button {
                             viewModel.removeSong(from: memoryID, song: song)
@@ -622,6 +649,13 @@ struct MemoryMediaSheet: View {
                     .padding(.vertical, 6)
                     .padding(.horizontal, 20)
                     .contextMenu {
+                        if let urlString = song.externalURL, let url = URL(string: urlString) {
+                            Button {
+                                UIApplication.shared.open(url)
+                            } label: {
+                                Label("Open in \(urlString.contains("spotify") ? "Spotify" : "Browser")", systemImage: "arrow.up.right.square")
+                            }
+                        }
                         Button(role: .destructive) {
                             viewModel.removeSong(from: memoryID, song: song)
                         } label: {
@@ -781,6 +815,8 @@ struct MemoryMediaSheet: View {
 
                             Spacer()
 
+                            SongPreviewButton(track: track)
+
                             if !track.duration.isEmpty {
                                 Text(track.duration)
                                     .font(.caption)
@@ -846,6 +882,12 @@ struct MemoryMediaSheet: View {
         }
     }
 
+    /// Whether the signed-in user may add people: always for the owner, and
+    /// for everyone else when the owner has enabled guest invites.
+    private var canAddPeople: Bool {
+        viewModel.isOwner(of: memoryID) || memory.allowsGuestInvites
+    }
+
     private var peopleSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -853,14 +895,34 @@ struct MemoryMediaSheet: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button {
-                    showAddPeopleSheet = true
-                } label: {
-                    Label("Add", systemImage: "person.badge.plus")
-                        .font(.subheadline.weight(.medium))
+                if canAddPeople {
+                    Button {
+                        showAddPeopleSheet = true
+                    } label: {
+                        Label("Add", systemImage: "person.badge.plus")
+                            .font(.subheadline.weight(.medium))
+                    }
                 }
             }
             .padding(.horizontal, 20)
+
+            if viewModel.isOwner(of: memoryID) {
+                Toggle(isOn: Binding(
+                    get: { memory.allowsGuestInvites },
+                    set: { viewModel.setGuestInvites(for: memoryID, allowed: $0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Let others add people")
+                            .font(.subheadline.weight(.medium))
+                        Text("Everyone this memory is shared with can invite more friends")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(12)
+                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+                .padding(.horizontal, 20)
+            }
 
             if memory.connections.isEmpty {
                 VStack(spacing: 12) {
@@ -870,13 +932,15 @@ struct MemoryMediaSheet: View {
                     Text("No people added")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
-                    Button {
-                        showAddPeopleSheet = true
-                    } label: {
-                        Label("Add People", systemImage: "person.badge.plus")
-                            .font(.subheadline.weight(.medium))
+                    if canAddPeople {
+                        Button {
+                            showAddPeopleSheet = true
+                        } label: {
+                            Label("Add People", systemImage: "person.badge.plus")
+                                .font(.subheadline.weight(.medium))
+                        }
+                        .buttonStyle(.bordered)
                     }
-                    .buttonStyle(.bordered)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 32)
@@ -907,6 +971,109 @@ struct MemoryMediaSheet: View {
                     .padding(.horizontal, 20)
                     .padding(.vertical, 4)
                 }
+            }
+        }
+    }
+}
+
+/// Plays / stops a 30-second in-app clip for a song or playlist track.
+struct SongPreviewButton: View {
+    let track: PlaylistTrack
+
+    private var player: PreviewPlayerService { .shared }
+
+    var body: some View {
+        Button {
+            Task { await player.toggle(track) }
+        } label: {
+            if player.isPlaying(track.id) && player.isLoading {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 28, height: 28)
+            } else {
+                Image(systemName: player.isPlaying(track.id) ? "pause.circle.fill" : "play.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(player.isPlaying(track.id) ? .blue : .green)
+                    .symbolEffect(.pulse, isActive: player.isPlaying(track.id))
+            }
+        }
+        .buttonStyle(.borderless)
+    }
+}
+
+/// Shows the resolved street address for a tapped memory pin.
+struct PinAddressSheet: View {
+    let pin: MemoryPin
+    @Environment(\.dismiss) private var dismiss
+    @State private var address: String?
+    @State private var isLoading = true
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(spacing: 12) {
+                    Image(systemName: "mappin.circle.fill")
+                        .font(.system(size: 36))
+                        .foregroundStyle(.red)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(pin.title)
+                            .font(.headline)
+                        Text(pin.date, style: .date)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("ADDRESS")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.secondary)
+                    if isLoading {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("Looking up address...")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Text(address ?? "No address found for this spot")
+                            .font(.subheadline)
+                    }
+                    Text(String(format: "%.4f, %.4f", pin.coordinate.latitude, pin.coordinate.longitude))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.tertiary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
+                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+
+                Button {
+                    let placemark = MKPlacemark(coordinate: pin.coordinate)
+                    let item = MKMapItem(placemark: placemark)
+                    item.name = pin.title
+                    item.openInMaps()
+                } label: {
+                    Label("Open in Maps", systemImage: "arrow.triangle.turn.up.right.circle.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                }
+                .buttonStyle(.borderedProminent)
+
+                Spacer()
+            }
+            .padding(20)
+            .navigationTitle("Pin Location")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .task {
+                address = await LocationService.address(for: pin.coordinate)
+                isLoading = false
             }
         }
     }
@@ -1169,10 +1336,11 @@ struct AddPlaylistSheet: View {
 
     private let spotifyGreen = Color(red: 0.11, green: 0.84, blue: 0.38)
 
-    /// A pasted Spotify link we can auto-resolve into a real name + tracks.
+    /// A pasted Spotify link we can auto-resolve. With API credentials we get
+    /// the full track list; without them we still fetch the name + cover via
+    /// Spotify's public oEmbed endpoint.
     private var canAutoResolve: Bool {
         selectedSource == .spotify
-            && SpotifyConfig.isConfigured
             && SpotifyService.playlistID(from: playlistURL) != nil
     }
 
@@ -1313,17 +1481,38 @@ struct AddPlaylistSheet: View {
         isResolving = true
         errorMessage = nil
         Task {
-            do {
-                if !SpotifyService.shared.isConnected {
-                    try await SpotifyService.shared.connect()
+            // Full import (name + cover + tracks) when Spotify API access is
+            // available; otherwise fall back to the public oEmbed lookup which
+            // still resolves the playlist's real name and cover art.
+            if SpotifyConfig.isConfigured {
+                do {
+                    if !SpotifyService.shared.isConnected {
+                        try await SpotifyService.shared.connect()
+                    }
+                    let playlist = try await SpotifyService.shared.importPlaylist(fromURL: trimmedURL)
+                    viewModel.setPlaylist(for: memoryID, playlist: playlist)
+                    isResolving = false
+                    dismiss()
+                    return
+                } catch {
+                    // Fall through to the oEmbed lookup below.
                 }
-                let playlist = try await SpotifyService.shared.importPlaylist(fromURL: trimmedURL)
+            }
+
+            do {
+                let info = try await SpotifyService.fetchOEmbed(for: trimmedURL)
+                let playlist = PlaylistAttachment(
+                    name: playlistName.isEmpty ? info.title : playlistName,
+                    source: .spotify,
+                    coverURL: info.thumbnail_url,
+                    externalURL: trimmedURL
+                )
                 viewModel.setPlaylist(for: memoryID, playlist: playlist)
                 isResolving = false
                 dismiss()
             } catch {
                 isResolving = false
-                errorMessage = error.localizedDescription
+                errorMessage = "Couldn't fetch that playlist. Check the link and try again."
             }
         }
     }
@@ -1618,11 +1807,10 @@ struct PhotoViewerSheet: View {
         NavigationStack {
             TabView(selection: $currentIndex) {
                 ForEach(Array(photoURLs.enumerated()), id: \.offset) { index, url in
-                    Color.clear
-                        .overlay {
-                            MediaImageView(urlString: url, contentMode: .fit)
-                        }
-                        .tag(index)
+                    ZoomableContainer {
+                        MediaImageView(urlString: url, contentMode: .fit)
+                    }
+                    .tag(index)
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .automatic))
@@ -1641,6 +1829,86 @@ struct PhotoViewerSheet: View {
                 }
             }
         }
+    }
+}
+
+/// Adds pinch-to-zoom, drag-to-pan, and double-tap zoom to any content — used
+/// by the photo viewer.
+struct ZoomableContainer<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    @State private var scale: CGFloat = 1
+    @State private var lastScale: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @State private var lastOffset: CGSize = .zero
+
+    private let minScale: CGFloat = 1
+    private let maxScale: CGFloat = 5
+
+    var body: some View {
+        GeometryReader { proxy in
+            Color.clear
+                .overlay {
+                    content
+                        .scaleEffect(scale)
+                        .offset(offset)
+                }
+                .contentShape(Rectangle())
+                .simultaneousGesture(zoomGesture)
+                .simultaneousGesture(panGesture)
+                .onTapGesture(count: 2) { location in
+                    withAnimation(.spring(duration: 0.3)) {
+                        if scale > 1 {
+                            scale = 1
+                            offset = .zero
+                        } else {
+                            scale = 2.5
+                            // Zoom toward the tapped point.
+                            let center = CGPoint(x: proxy.size.width / 2, y: proxy.size.height / 2)
+                            offset = CGSize(
+                                width: (center.x - location.x) * 1.5,
+                                height: (center.y - location.y) * 1.5
+                            )
+                        }
+                        lastScale = scale
+                        lastOffset = offset
+                    }
+                }
+        }
+        .clipped()
+    }
+
+    private var zoomGesture: some Gesture {
+        MagnifyGesture()
+            .onChanged { value in
+                scale = min(max(lastScale * value.magnification, minScale * 0.8), maxScale)
+            }
+            .onEnded { _ in
+                withAnimation(.spring(duration: 0.25)) {
+                    scale = min(max(scale, minScale), maxScale)
+                    if scale <= minScale {
+                        offset = .zero
+                    }
+                }
+                lastScale = scale
+                lastOffset = offset
+            }
+    }
+
+    private var panGesture: some Gesture {
+        DragGesture()
+            .onChanged { value in
+                // Only pan while zoomed in; otherwise the page swipe handles it.
+                guard scale > 1 else { return }
+                offset = CGSize(
+                    width: lastOffset.width + value.translation.width,
+                    height: lastOffset.height + value.translation.height
+                )
+            }
+            .onEnded { _ in
+                guard scale > 1 else { return }
+                lastOffset = offset
+            }
     }
 }
 
