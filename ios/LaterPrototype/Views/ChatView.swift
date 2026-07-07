@@ -43,9 +43,14 @@ struct ChatView: View {
                     } else if messages.isEmpty {
                         emptyState
                     } else {
-                        ForEach(messages) { message in
-                            bubble(message)
-                                .id(message.id)
+                        ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
+                            VStack(spacing: 10) {
+                                if showsDayHeader(at: index) {
+                                    dayHeader(for: message.date)
+                                }
+                                bubble(message, showsTime: showsTime(at: index))
+                            }
+                            .id(message.id)
                         }
                     }
                 }
@@ -74,21 +79,61 @@ struct ChatView: View {
         .padding(.top, 60)
     }
 
-    private func bubble(_ message: LaterViewModel.ChatBubble) -> some View {
+    private func bubble(_ message: LaterViewModel.ChatBubble, showsTime: Bool) -> some View {
         HStack {
             if message.isMine { Spacer(minLength: 48) }
-            Text(message.body)
-                .font(.body)
-                .foregroundStyle(message.isMine ? .white : .primary)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(
-                    message.isMine ? AnyShapeStyle(Color.blue) : AnyShapeStyle(Color(.secondarySystemBackground)),
-                    in: .rect(cornerRadius: 18)
-                )
+            VStack(alignment: message.isMine ? .trailing : .leading, spacing: 3) {
+                Text(message.body)
+                    .font(.body)
+                    .foregroundStyle(message.isMine ? .white : .primary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(
+                        message.isMine ? AnyShapeStyle(Color.blue) : AnyShapeStyle(Color(.secondarySystemBackground)),
+                        in: .rect(cornerRadius: 18)
+                    )
+                if showsTime {
+                    Text(message.date, format: .dateTime.hour().minute())
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 4)
+                }
+            }
             if !message.isMine { Spacer(minLength: 48) }
         }
         .frame(maxWidth: .infinity, alignment: message.isMine ? .trailing : .leading)
+    }
+
+    private func dayHeader(for date: Date) -> some View {
+        Text(dayLabel(for: date))
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
+            .background(Color(.secondarySystemBackground), in: .capsule)
+            .padding(.top, 6)
+    }
+
+    private func dayLabel(for date: Date) -> String {
+        if Calendar.current.isDateInToday(date) { return "Today" }
+        if Calendar.current.isDateInYesterday(date) { return "Yesterday" }
+        return date.formatted(.dateTime.weekday(.wide).month(.abbreviated).day())
+    }
+
+    /// A day header shows before the first message of each calendar day.
+    private func showsDayHeader(at index: Int) -> Bool {
+        guard index > 0 else { return true }
+        return !Calendar.current.isDate(messages[index - 1].date, inSameDayAs: messages[index].date)
+    }
+
+    /// The time label shows on the last message of a sender's burst, or when
+    /// more than a few minutes separate two messages.
+    private func showsTime(at index: Int) -> Bool {
+        guard index + 1 < messages.count else { return true }
+        let current = messages[index]
+        let next = messages[index + 1]
+        if current.isMine != next.isMine { return true }
+        return next.date.timeIntervalSince(current.date) > 300
     }
 
     private var composer: some View {
