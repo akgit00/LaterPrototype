@@ -11,6 +11,7 @@ struct ProfileView: View {
     @State private var showAddConnection = false
     @State private var selectedMemoryID: UUID?
     @State private var chatFriend: Connection?
+    @State private var profileFriend: Connection?
     @State private var capsuleCount: Int = 0
     @State private var showShareProfile: Bool = false
 
@@ -48,6 +49,7 @@ struct ProfileView: View {
     }
 
     var body: some View {
+        @Bindable var bindableViewModel = viewModel
         NavigationStack {
             ScrollView {
                 VStack(spacing: 0) {
@@ -98,6 +100,9 @@ struct ProfileView: View {
                         } label: {
                             Label("Edit Profile", systemImage: "pencil")
                         }
+                        Toggle(isOn: $bindableViewModel.readReceiptsEnabled) {
+                            Label("Send Read Receipts", systemImage: "checkmark.message")
+                        }
                         Button(role: .destructive) {
                             showSignOutConfirm = true
                         } label: {
@@ -120,6 +125,9 @@ struct ProfileView: View {
             }
             .sheet(item: $chatFriend) { friend in
                 ChatView(viewModel: viewModel, friend: friend)
+            }
+            .sheet(item: $profileFriend) { friend in
+                FriendProfileView(connection: friend, viewModel: viewModel)
             }
             .sheet(isPresented: $showEditProfile) {
                 EditProfileView(
@@ -394,28 +402,38 @@ struct ProfileView: View {
                 sectionHeader("Connections", count: viewModel.allConnections.count)
 
                 ForEach(viewModel.allConnections) { connection in
-                    let sharedCount = viewModel.memories.filter { $0.connections.contains(where: { $0.id == connection.id }) }.count
+                    let sharedCount = viewModel.memoriesInvolving(connection.id).count
 
                     let unread = viewModel.unreadByFriend[connection.id] ?? 0
 
-                    Button {
-                        viewModel.markConversationRead(with: connection)
-                        chatFriend = connection
-                    } label: {
-                        HStack(spacing: 12) {
-                            ConnectionAvatarView(connection: connection, size: 40)
+                    HStack(spacing: 8) {
+                        // Tapping the person opens their profile…
+                        Button {
+                            profileFriend = connection
+                        } label: {
+                            HStack(spacing: 12) {
+                                ConnectionAvatarView(connection: connection, size: 40)
 
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(connection.displayName)
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(.primary)
-                                Text("\(sharedCount) shared memor\(sharedCount == 1 ? "y" : "ies")")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(connection.displayName)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(.primary)
+                                    Text("\(sharedCount) shared memor\(sharedCount == 1 ? "y" : "ies")")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                Spacer()
                             }
+                            .contentShape(.rect)
+                        }
+                        .buttonStyle(.plain)
 
-                            Spacer()
-
+                        // …while the message icon jumps straight into the chat.
+                        Button {
+                            viewModel.markConversationRead(with: connection)
+                            chatFriend = connection
+                        } label: {
                             ZStack(alignment: .topTrailing) {
                                 Image(systemName: "message.fill")
                                     .font(.body)
@@ -431,11 +449,12 @@ struct ProfileView: View {
                                         .offset(x: 11, y: -11)
                                 }
                             }
+                            .frame(width: 44, height: 40)
+                            .contentShape(.rect)
                         }
-                        .contentShape(.rect)
-                        .padding(.horizontal, 16)
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
+                    .padding(.horizontal, 16)
                 }
             }
         }

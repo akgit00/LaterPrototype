@@ -10,20 +10,58 @@ struct ChatView: View {
     @State private var draft = ""
     @State private var isLoading = true
     @State private var isSending = false
+    @State private var showProfile = false
     @FocusState private var inputFocused: Bool
 
+    /// The most recent of my messages the friend has read — the one that
+    /// shows the "Read" receipt.
+    private var lastReadMineID: UUID? {
+        messages.last(where: { $0.isMine && $0.readAt != nil })?.id
+    }
+
     var body: some View {
+        @Bindable var bindableViewModel = viewModel
         NavigationStack {
             VStack(spacing: 0) {
                 conversation
                 composer
             }
-            .navigationTitle(friend.displayName)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Close") { dismiss() }
                 }
+                // Tapping the friend's picture or name opens their profile.
+                ToolbarItem(placement: .principal) {
+                    Button {
+                        showProfile = true
+                    } label: {
+                        HStack(spacing: 8) {
+                            ConnectionAvatarView(connection: friend, size: 30)
+                            Text(friend.displayName)
+                                .font(.headline)
+                                .foregroundStyle(.primary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button {
+                            showProfile = true
+                        } label: {
+                            Label("View Profile", systemImage: "person.crop.circle")
+                        }
+                        Toggle(isOn: $bindableViewModel.readReceiptsEnabled) {
+                            Label("Send Read Receipts", systemImage: "checkmark.message")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                }
+            }
+            .sheet(isPresented: $showProfile) {
+                FriendProfileView(connection: friend, viewModel: viewModel, showsMessageButton: false)
             }
         }
         .task { await load() }
@@ -31,6 +69,14 @@ struct ChatView: View {
         // seconds while the chat is open so the other person's replies appear
         // without pulling to refresh.
         .task(id: friend.id) { await pollLoop() }
+        // While this chat is on screen its messages never count as unread, so
+        // the message notification clears the moment the conversation opens.
+        .onAppear { viewModel.activeChatFriendID = friend.id }
+        .onDisappear {
+            if viewModel.activeChatFriendID == friend.id {
+                viewModel.activeChatFriendID = nil
+            }
+        }
     }
 
     private var conversation: some View {
@@ -48,7 +94,11 @@ struct ChatView: View {
                                 if showsDayHeader(at: index) {
                                     dayHeader(for: message.date)
                                 }
-                                bubble(message, showsTime: showsTime(at: index))
+                                bubble(
+                                    message,
+                                    showsTime: showsTime(at: index),
+                                    isLastReadMine: message.id == lastReadMineID
+                                )
                             }
                             .id(message.id)
                         }
@@ -79,7 +129,7 @@ struct ChatView: View {
         .padding(.top, 60)
     }
 
-    private func bubble(_ message: LaterViewModel.ChatBubble, showsTime: Bool) -> some View {
+    private func bubble(_ message: LaterViewModel.ChatBubble, showsTime: Bool, isLastReadMine: Bool) -> some View {
         HStack {
             if message.isMine { Spacer(minLength: 48) }
             VStack(alignment: message.isMine ? .trailing : .leading, spacing: 3) {
@@ -95,6 +145,12 @@ struct ChatView: View {
                 if showsTime {
                     Text(message.date, format: .dateTime.hour().minute())
                         .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 4)
+                }
+                if isLastReadMine {
+                    Text("Read")
+                        .font(.caption2.weight(.semibold))
                         .foregroundStyle(.tertiary)
                         .padding(.horizontal, 4)
                 }
@@ -182,7 +238,8 @@ struct ChatView: View {
             var byID = Dictionary(messages.map { ($0.id, $0) }, uniquingKeysWith: { current, _ in current })
             for message in latest { byID[message.id] = message }
             let merged = byID.values.sorted { $0.date < $1.date }
-            if merged.map(\.id) != messages.map(\.id) {
+            // Refresh when messages arrive OR when read receipts change.
+            if merged.map(\.id) != messages.map(\.id) || merged.map(\.readAt) != messages.map(\.readAt) {
                 messages = merged
                 // The chat is open and on-screen, so anything that just arrived
                 // is effectively read — keep its badge from reappearing.
