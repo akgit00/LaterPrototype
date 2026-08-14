@@ -11,7 +11,7 @@ import Foundation
 /// and tick the "Web API" box under "Which API/SDKs are you planning to use?".
 enum SpotifyConfig {
     /// Paste your Spotify app's **Client ID** here for standalone Xcode builds.
-    private static let fallbackClientID = ""
+    private static let fallbackClientID = "29131f5ad571402bb63bc20d80113931"
 
     /// Resolves the injected env value first, then the committed fallback.
     static var clientID: String {
