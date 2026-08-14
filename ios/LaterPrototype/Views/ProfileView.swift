@@ -12,6 +12,7 @@ struct ProfileView: View {
     @State private var selectedMemoryID: UUID?
     @State private var chatFriend: Connection?
     @State private var capsuleCount: Int = 0
+    @State private var showShareProfile: Bool = false
 
     private static let defaultBio = "Collecting moments across time & space"
 
@@ -457,29 +458,202 @@ struct ProfileView: View {
     }
 
     private var legacyContent: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "sparkles")
-                .font(.system(size: 40))
-                .foregroundStyle(.purple)
+        VStack(spacing: 20) {
+            // Hero header
+            VStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [.purple, .blue, .teal],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 80, height: 80)
 
-            Text("Your Digital Legacy")
-                .font(.title3.weight(.bold))
+                    if let picture = avatarURL, let url = URL(string: picture) {
+                        AsyncImage(url: url) { image in
+                            image.resizable().aspectRatio(contentMode: .fill)
+                        } placeholder: {
+                            Text(initial)
+                                .font(.system(size: 32, weight: .bold))
+                                .foregroundStyle(.white)
+                        }
+                        .frame(width: 80, height: 80)
+                        .clipShape(.circle)
+                    } else {
+                        Text(initial)
+                            .font(.system(size: 32, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                }
+                .shadow(color: .purple.opacity(0.3), radius: 12, x: 0, y: 6)
 
-            Text("Your public profile showcases your shared memories and connections. This is how friends and future connections will remember you.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 32)
+                Text(displayName)
+                    .font(.title3.weight(.bold))
+                if let username = viewModel.currentUsername {
+                    Text("@\(username)")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.tertiary)
+                }
+                if !bio.isEmpty {
+                    Text(bio)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                }
+            }
+            .padding(.top, 8)
 
+            // Legacy stats
+            HStack(spacing: 0) {
+                legacyStat(
+                    icon: "photo.on.rectangle",
+                    value: viewModel.memories.flatMap(\.photoURLs).count,
+                    label: "Photos"
+                )
+                Divider().frame(height: 32)
+                legacyStat(
+                    icon: "video.fill",
+                    value: viewModel.memories.flatMap(\.videos).count,
+                    label: "Videos"
+                )
+                Divider().frame(height: 32)
+                legacyStat(
+                    icon: "person.2.fill",
+                    value: viewModel.allConnections.count,
+                    label: "Friends"
+                )
+            }
+            .padding(.vertical, 14)
+            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+            .padding(.horizontal, 16)
+
+            // Featured memories grid
+            VStack(alignment: .leading, spacing: 10) {
+                Text("FEATURED MEMORIES")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 16)
+
+                let featured = viewModel.memories.prefix(6)
+                if featured.isEmpty {
+                    VStack(spacing: 10) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 28))
+                            .foregroundStyle(.tertiary)
+                        Text("No public memories yet")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 32)
+                } else {
+                    LazyVGrid(
+                        columns: [
+                            GridItem(.flexible(), spacing: 8),
+                            GridItem(.flexible(), spacing: 8),
+                            GridItem(.flexible(), spacing: 8)
+                        ],
+                        spacing: 8
+                    ) {
+                        ForEach(Array(featured), id: \ .id) { memory in
+                            Button {
+                                selectedMemoryID = memory.id
+                            } label: {
+                                ZStack {
+                                    if let firstPhoto = memory.photoURLs.first {
+                                        Color(.secondarySystemBackground)
+                                            .aspectRatio(1, contentMode: .fill)
+                                            .overlay {
+                                                MediaImageView(urlString: firstPhoto)
+                                                    .allowsHitTesting(false)
+                                            }
+                                            .clipShape(.rect(cornerRadius: 12))
+                                    } else {
+                                        RoundedRectangle(cornerRadius: 12)
+                                            .fill(
+                                                LinearGradient(
+                                                    colors: [.purple.opacity(0.6), .blue.opacity(0.4)],
+                                                    startPoint: .topLeading,
+                                                    endPoint: .bottomTrailing
+                                                )
+                                            )
+                                            .aspectRatio(1, contentMode: .fill)
+                                            .overlay {
+                                                Image(systemName: "mappin.circle.fill")
+                                                    .font(.title)
+                                                    .foregroundStyle(.white.opacity(0.8))
+                                            }
+                                    }
+
+                                    LinearGradient(
+                                        colors: [.clear, .black.opacity(0.6)],
+                                        startPoint: .center,
+                                        endPoint: .bottom
+                                    )
+                                    .clipShape(.rect(cornerRadius: 12))
+
+                                    VStack(alignment: .leading) {
+                                        Spacer()
+                                        Text(memory.title)
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.white)
+                                            .lineLimit(1)
+                                        Text(memory.date, format: .dateTime.month(.abbreviated).year())
+                                            .font(.caption2)
+                                            .foregroundStyle(.white.opacity(0.7))
+                                    }
+                                    .padding(8)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                }
+            }
+
+            // Share profile button
             Button {
+                showShareProfile = true
             } label: {
-                Text("Customize Legacy")
+                Label("Share Public Profile", systemImage: "square.and.arrow.up")
                     .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
             }
             .buttonStyle(.borderedProminent)
-            .padding(.top, 8)
+            .tint(.purple)
+            .clipShape(.capsule)
+            .padding(.horizontal, 16)
+            .padding(.top, 4)
         }
-        .padding(.vertical, 24)
+        .padding(.bottom, 32)
+        .sheet(isPresented: $showShareProfile) {
+            ShareProfileSheet(
+                username: viewModel.currentUsername,
+                displayName: displayName,
+                bio: bio
+            )
+            .presentationDetents([.medium])
+        }
+    }
+
+    private func legacyStat(icon: String, value: Int, label: String) -> some View {
+        VStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.caption)
+                .foregroundStyle(.purple)
+            Text("\(value)")
+                .font(.title3.weight(.bold))
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
     }
 
     /// One-line stats for a timeline row: live people, photo and video counts.
@@ -499,4 +673,105 @@ struct ProfileView: View {
         formatter.dateFormat = "MMM d"
         return formatter.string(from: date)
     }
+}
+
+/// Sheet showing the user's public profile preview and a system share link
+/// so they can share their Later profile with friends.
+struct ShareProfileSheet: View {
+    let username: String?
+    let displayName: String
+    let bio: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var showShareSheet: Bool = false
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 24) {
+                // Preview card — what friends see
+                VStack(spacing: 12) {
+                    ZStack {
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [.purple, .blue, .teal],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 72, height: 72)
+                        Text(String(displayName.prefix(1)).uppercased())
+                            .font(.system(size: 28, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+
+                    Text(displayName)
+                        .font(.headline)
+                    if let username {
+                        Text("@\(username)")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.tertiary)
+                    }
+                    Text(bio)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 24)
+                }
+                .padding(20)
+                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+
+                VStack(spacing: 8) {
+                    Image(systemName: "person.crop.circle.badge.checkmark")
+                        .font(.system(size: 36))
+                        .foregroundStyle(.purple)
+                    Text("Your public profile is live")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Friends can find you by your @username and see the memories you've shared.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                }
+
+                Spacer()
+
+                Button {
+                    showShareSheet = true
+                } label: {
+                    Label("Share Profile Link", systemImage: "square.and.arrow.up")
+                        .font(.body.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.purple)
+                .clipShape(.capsule)
+                .padding(.horizontal, 20)
+            }
+            .padding(.vertical, 16)
+            .navigationTitle("Your Legacy")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .sheet(isPresented: $showShareSheet) {
+                if let username {
+                    ShareSheet(items: ["Find me on Later: @\(username)"])
+                }
+            }
+        }
+    }
+}
+
+/// Wraps `UIActivityViewController` for SwiftUI.
+struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
