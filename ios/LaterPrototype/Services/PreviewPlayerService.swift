@@ -88,7 +88,26 @@ final class PreviewPlayerService {
     private func previewURL(for track: PlaylistTrack) async throws -> URL? {
         if let cached = previewURLCache[track.id] { return cached }
 
-        let term = track.artist.isEmpty ? track.title : "\(track.title) \(track.artist)"
+        let title = Self.cleanedSearchText(track.title)
+        let artist = Self.cleanedSearchText(track.artist)
+        guard !title.isEmpty else { return nil }
+
+        // Try "title artist" first, then title alone — imported tracks sometimes
+        // carry noisy or missing artist fields that break the exact match.
+        var terms: [String] = []
+        if !artist.isEmpty { terms.append("\(title) \(artist)") }
+        terms.append(title)
+
+        for term in terms {
+            if let previewURL = try await searchITunes(term: term) {
+                previewURLCache[track.id] = previewURL
+                return previewURL
+            }
+        }
+        return nil
+    }
+
+    private func searchITunes(term: String) async throws -> URL? {
         var components = URLComponents(string: "https://itunes.apple.com/search")
         components?.queryItems = [
             URLQueryItem(name: "term", value: term),
@@ -104,8 +123,18 @@ final class PreviewPlayerService {
             let preview = response.results.compactMap({ $0.previewUrl }).first,
             let previewURL = URL(string: preview)
         else { return nil }
-
-        previewURLCache[track.id] = previewURL
         return previewURL
+    }
+
+    /// Strips share-link noise (e.g. "Song – song and lyrics by Artist | Spotify")
+    /// that sabotages the iTunes match for imported tracks.
+    nonisolated private static func cleanedSearchText(_ text: String) -> String {
+        var cleaned = text
+        for separator in [" | ", " - song and lyrics by ", " - song by ", " - playlist by "] {
+            if let range = cleaned.range(of: separator) {
+                cleaned = String(cleaned[..<range.lowerBound])
+            }
+        }
+        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

@@ -559,6 +559,15 @@ struct MemoryMediaSheet: View {
             }
             .padding(.horizontal, 20)
 
+            // Surfaces clip-playback problems (e.g. no preview found for a
+            // track) instead of the play button silently doing nothing.
+            if let previewError = previewPlayer.errorMessage {
+                Label(previewError, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 20)
+            }
+
             if memory.playlist != nil {
                 linkedPlaylistView
             }
@@ -1512,7 +1521,7 @@ struct AddPlaylistSheet: View {
                 dismiss()
             } catch {
                 isResolving = false
-                errorMessage = "Couldn't fetch that playlist. Check the link and try again."
+                errorMessage = "Couldn't fetch that playlist. Private playlists can't be read from just a link — make it public in Spotify, or connect your Spotify account and try again."
             }
         }
     }
@@ -1916,6 +1925,14 @@ struct VideoPlayerView: View {
     let url: URL
     @Environment(\.dismiss) private var dismiss
     @State private var player: AVPlayer
+    @State private var scale: CGFloat = 1
+    @State private var lastScale: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @State private var lastOffset: CGSize = .zero
+    @State private var isControlsVisible: Bool = true
+
+    private let minScale: CGFloat = 1
+    private let maxScale: CGFloat = 5
 
     init(url: URL) {
         self.url = url
@@ -1926,20 +1943,102 @@ struct VideoPlayerView: View {
         ZStack(alignment: .topTrailing) {
             Color.black.ignoresSafeArea()
 
-            VideoPlayer(player: player)
-                .ignoresSafeArea()
-                .onAppear { player.play() }
-                .onDisappear { player.pause() }
+            GeometryReader { proxy in
+                VideoPlayer(player: player)
+                    .scaleEffect(scale)
+                    .offset(offset)
+                    .ignoresSafeArea()
+                    .gesture(zoomGesture)
+                    .gesture(panGesture)
+                    .onTapGesture(count: 2) { location in
+                        withAnimation(.spring(duration: 0.3)) {
+                            if scale > 1 {
+                                scale = 1
+                                offset = .zero
+                            } else {
+                                scale = 2.5
+                                let center = CGPoint(x: proxy.size.width / 2, y: proxy.size.height / 2)
+                                offset = CGSize(
+                                    width: (center.x - location.x) * 1.5,
+                                    height: (center.y - location.y) * 1.5
+                                )
+                            }
+                            lastScale = scale
+                            lastOffset = offset
+                        }
+                    }
+                    .onTapGesture {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            isControlsVisible.toggle()
+                        }
+                    }
+            }
+            .clipped()
 
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.title)
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(.white)
-                    .padding(16)
+            if isControlsVisible {
+                VStack(spacing: 16) {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title)
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(.white)
+                    }
+
+                    if scale > 1 {
+                        Button {
+                            withAnimation(.spring(duration: 0.3)) {
+                                scale = 1
+                                offset = .zero
+                                lastScale = 1
+                                lastOffset = .zero
+                            }
+                        } label: {
+                            Image(systemName: "1.magnifyingglass")
+                                .font(.title3)
+                                .foregroundStyle(.white)
+                                .padding(10)
+                                .background(.ultraThinMaterial, in: Circle())
+                        }
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .topTrailing)
+                .transition(.opacity)
             }
         }
+        .onAppear { player.play() }
+        .onDisappear { player.pause() }
+    }
+
+    private var zoomGesture: some Gesture {
+        MagnifyGesture()
+            .onChanged { value in
+                scale = min(max(lastScale * value.magnification, minScale * 0.8), maxScale)
+            }
+            .onEnded { _ in
+                withAnimation(.spring(duration: 0.25)) {
+                    scale = min(max(scale, minScale), maxScale)
+                    if scale <= minScale { offset = .zero }
+                }
+                lastScale = scale
+                lastOffset = offset
+            }
+    }
+
+    private var panGesture: some Gesture {
+        DragGesture()
+            .onChanged { value in
+                guard scale > 1 else { return }
+                offset = CGSize(
+                    width: lastOffset.width + value.translation.width,
+                    height: lastOffset.height + value.translation.height
+                )
+            }
+            .onEnded { _ in
+                guard scale > 1 else { return }
+                lastOffset = offset
+            }
     }
 }
