@@ -313,3 +313,18 @@ drop policy if exists "delete own push token" on public.push_tokens;
 create policy "delete own push token"
     on public.push_tokens for delete to authenticated
     using (user_id = auth.uid()::text);
+
+
+-- ── Read receipts for direct messages ───────────────────────────────────
+alter table public.messages
+    add column if not exists read_at timestamptz;
+
+-- Recipients may update ONLY the read_at column of messages sent to them.
+grant update (read_at) on public.messages to authenticated;
+
+drop policy if exists "recipient can mark messages read" on public.messages;
+create policy "recipient can mark messages read"
+    on public.messages for update
+    to authenticated
+    using (recipient_id = auth.uid())
+    with check (recipient_id = auth.uid());

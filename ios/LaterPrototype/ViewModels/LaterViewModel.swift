@@ -13,10 +13,25 @@ final class LaterViewModel {
 
     var allConnections: [Connection] = []
 
+    /// The `connections` table row id for each accepted friend, so a friend
+    /// can be removed from their profile.
+    private(set) var friendRowIDs: [UUID: UUID] = [:]
+
     /// Unread message count per friend (by connection id), used to drive the
     /// badges next to each conversation and the tab badge. Computed against a
     /// per-conversation last-read timestamp stored locally on this device.
     var unreadByFriend: [UUID: Int] = [:]
+
+    /// The friend whose chat is currently open on screen. Their messages are
+    /// never counted as unread, so opening a conversation reliably clears its
+    /// notification badge.
+    var activeChatFriendID: UUID?
+
+    /// Whether this user reports read receipts to their friends. When off,
+    /// conversations they open are never marked as read for the other person.
+    var readReceiptsEnabled: Bool = UserDefaults.standard.object(forKey: "read_receipts_enabled") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(readReceiptsEnabled, forKey: "read_receipts_enabled") }
+    }
 
     /// Connection (friends) state.
     var incomingRequests: [FriendRequest] = []
@@ -944,6 +959,7 @@ final class LaterViewModel {
             var friends: [Connection] = []
             var incoming: [FriendRequest] = []
             var outgoing: [FriendRequest] = []
+            var rowIDs: [UUID: UUID] = [:]
 
             for row in rows {
                 let otherID = row.otherID(currentUserID: userID)
@@ -959,6 +975,7 @@ final class LaterViewModel {
                 )
                 if row.status == "accepted" {
                     friends.append(connection)
+                    rowIDs[connection.id] = row.id
                 } else if row.addressee_id == userID {
                     incoming.append(FriendRequest(rowID: row.id, connection: connection))
                 } else {
@@ -969,6 +986,7 @@ final class LaterViewModel {
             allConnections = friends.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
             incomingRequests = incoming
             outgoingRequests = outgoing
+            friendRowIDs = rowIDs
         } catch {
             syncError = error.localizedDescription
         }
@@ -1030,6 +1048,38 @@ final class LaterViewModel {
         }
     }
 
+    /// Removes an accepted friend connection entirely.
+    @MainActor
+    func removeFriend(_ connection: Connection) async {
+        guard let rowID = friendRowIDs[connection.id] else { return }
+        do {
+            try await ConnectionService.remove(id: rowID)
+            await loadConnections()
+        } catch {
+            syncError = error.localizedDescription
+        }
+    }
+
+    /// The signed-in user's relationship with another user.
+    enum Relationship {
+        case friend
+        case incomingRequest(FriendRequest)
+        case outgoingRequest(FriendRequest)
+        case notConnected
+    }
+
+    /// How the signed-in user currently relates to the given user id.
+    func relationship(with connectionID: UUID) -> Relationship {
+        if allConnections.contains(where: { $0.id == connectionID }) { return .friend }
+        if let request = incomingRequests.first(where: { $0.connection.id == connectionID }) {
+            return .incomingRequest(request)
+        }
+        if let request = outgoingRequests.first(where: { $0.connection.id == connectionID }) {
+            return .outgoingRequest(request)
+        }
+        return .notConnected
+    }
+
     // MARK: - Messaging
 
     /// A direct message resolved for display in a conversation.
@@ -1038,6 +1088,8 @@ final class LaterViewModel {
         let body: String
         let isMine: Bool
         let date: Date
+        /// When the other person read this message (meaningful for mine only).
+        let readAt: Date?
     }
 
     /// Loads the conversation between the signed-in user and a connection,
@@ -1048,7 +1100,13 @@ final class LaterViewModel {
         do {
             let rows = try await MessageService.conversation(with: friend.id.uuidString, currentUserID: userID)
             return rows.map { row in
-                ChatBubble(id: row.id, body: row.body, isMine: row.isMine(currentUserID: userID), date: row.created_at)
+                ChatBubble(
+                    id: row.id,
+                    body: row.body,
+                    isMine: row.isMine(currentUserID: userID),
+                    date: row.created_at,
+                    readAt: row.read_at
+                )
             }
         } catch {
             syncError = error.localizedDescription
@@ -1064,7 +1122,13 @@ final class LaterViewModel {
         guard !trimmed.isEmpty else { return nil }
         do {
             guard let row = try await MessageService.send(to: friend.id.uuidString, body: trimmed) else { return nil }
-            return ChatBubble(id: row.id, body: row.body, isMine: row.isMine(currentUserID: userID), date: row.created_at)
+            return ChatBubble(
+                id: row.id,
+                body: row.body,
+                isMine: row.isMine(currentUserID: userID),
+                date: row.created_at,
+                readAt: row.read_at
+            )
         } catch {
             syncError = error.localizedDescription
             return nil
@@ -1081,13 +1145,20 @@ final class LaterViewModel {
         return stored > 0 ? Date(timeIntervalSince1970: stored) : .distantPast
     }
 
-    /// Marks a conversation as read up to now, clearing its unread badge.
+    /// Marks a conversation as read up to now, clearing its unread badge. When
+    /// read receipts are enabled, the friend's messages are also stamped read
+    /// in the cloud so they see a "Read" receipt.
     @MainActor
     func markConversationRead(with friend: Connection) {
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: lastReadPrefix + friend.id.uuidString)
         if unreadByFriend[friend.id] != nil {
             unreadByFriend[friend.id] = 0
         }
+        guard readReceiptsEnabled, let userID = currentUserID, SupabaseREST.hasSession else { return }
+        let friendID = friend.id.uuidString
+        // Best-effort: receipts are cosmetic, so failures are silent (e.g.
+        // before the read_at migration has been run).
+        Task { try? await MessageService.markRead(from: friendID, currentUserID: userID) }
     }
 
     /// Recomputes how many messages from each friend have arrived since the last
@@ -1100,6 +1171,10 @@ final class LaterViewModel {
             var counts: [UUID: Int] = [:]
             for row in rows {
                 guard let senderUUID = UUID(uuidString: row.sender_id) else { continue }
+                // A conversation that's open on screen is read by definition.
+                if senderUUID == activeChatFriendID { continue }
+                // Cross-device: anything stamped read in the cloud stays read.
+                if row.read_at != nil { continue }
                 if row.created_at > lastRead(for: senderUUID) {
                     counts[senderUUID, default: 0] += 1
                 }
@@ -1108,6 +1183,12 @@ final class LaterViewModel {
         } catch {
             // Non-fatal: leave the previous counts in place on a transient failure.
         }
+    }
+
+    /// Public helper so views building `Connection`s (e.g. search results) get
+    /// the same deterministic avatar color everywhere.
+    static func avatarColor(for id: String) -> ConnectionColor {
+        color(for: id)
     }
 
     /// Deterministically assigns an avatar color from a user id so the same
@@ -1128,6 +1209,13 @@ final class LaterViewModel {
 
     func memoryByID(_ id: UUID) -> Memory? {
         memories.first { $0.id == id }
+    }
+
+    /// Every visible memory that includes the given person (as owner or guest).
+    func memoriesInvolving(_ connectionID: UUID) -> [Memory] {
+        memories.filter { memory in
+            memory.connections.contains { $0.id == connectionID }
+        }
     }
 
     private func rebuildGlobalPins() {

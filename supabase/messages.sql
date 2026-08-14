@@ -54,3 +54,18 @@ create policy "delete own messages"
     on public.messages for delete
     to authenticated
     using (sender_id = auth.uid());
+
+-- Read receipts: when the recipient opens the conversation (with receipts
+-- enabled), their received messages are stamped read.
+alter table public.messages
+    add column if not exists read_at timestamptz;
+
+-- Recipients may update ONLY the read_at column of messages sent to them.
+grant update (read_at) on public.messages to authenticated;
+
+drop policy if exists "recipient can mark messages read" on public.messages;
+create policy "recipient can mark messages read"
+    on public.messages for update
+    to authenticated
+    using (recipient_id = auth.uid())
+    with check (recipient_id = auth.uid());
