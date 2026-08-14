@@ -406,6 +406,7 @@ class AuthManager {
 
     @MainActor
     func signOut() async {
+        PushNotificationService.shared.clearUserAssociation()
         if let token = KeychainHelper.get(accessKey),
            let url = URL(string: "\(baseURL)/auth/v1/logout") {
             var request = URLRequest(url: url)

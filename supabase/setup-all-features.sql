@@ -284,3 +284,32 @@ drop policy if exists "delete own songs" on public.memory_songs;
 create policy "delete own songs"
     on public.memory_songs for delete to authenticated
     using (author_id = auth.uid());
+
+
+-- ── Push notification tokens ────────────────────────────────────────────────
+create table if not exists public.push_tokens (
+    id            uuid primary key default gen_random_uuid(),
+    user_id       text not null,
+    device_token  text not null,
+    platform      text not null default 'ios',
+    updated_at    timestamptz not null default now(),
+    unique (user_id)
+);
+alter table public.push_tokens enable row level security;
+grant select, insert, update, delete on public.push_tokens to authenticated;
+
+drop policy if exists "upsert own push token" on public.push_tokens;
+create policy "upsert own push token"
+    on public.push_tokens for insert to authenticated
+    with check (user_id = auth.uid()::text);
+
+drop policy if exists "update own push token" on public.push_tokens;
+create policy "update own push token"
+    on public.push_tokens for update to authenticated
+    using (user_id = auth.uid()::text)
+    with check (user_id = auth.uid()::text);
+
+drop policy if exists "delete own push token" on public.push_tokens;
+create policy "delete own push token"
+    on public.push_tokens for delete to authenticated
+    using (user_id = auth.uid()::text);

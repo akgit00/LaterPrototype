@@ -27,6 +27,7 @@ struct ContentView: View {
             guard let user = auth.user else { return }
             viewModel.configure(userID: user.id, email: user.email, displayName: user.name)
             await profile.configure(userID: user.id)
+            await PushNotificationService.shared.syncToken(for: user.id)
             await viewModel.sync()
         }
         // Periodically poll the cloud while the app is active so new comments,
