@@ -80,6 +80,24 @@ nonisolated enum MediaService {
         )
     }
 
+    private struct MediaURLPatch: Encodable {
+        let url: String?
+        let thumbnail_url: String?
+    }
+
+    /// Repairs a row that was stored with a device-local file path: points it
+    /// at the uploaded public URL so everyone on the memory can load it.
+    static func updateURLs(id: UUID, url: String?, thumbnailURL: String?) async throws {
+        let patch = MediaURLPatch(url: url, thumbnail_url: thumbnailURL)
+        try await SupabaseREST.request(
+            path: "memory_media",
+            method: "PATCH",
+            query: [URLQueryItem(name: "id", value: "eq.\(id.uuidString)")],
+            body: try SupabaseREST.makeEncoder().encode(patch),
+            prefer: "return=minimal"
+        )
+    }
+
     /// Deletes a photo row by its url (RLS limits this to your own rows).
     static func deletePhoto(memoryID: UUID, url: String) async throws {
         try await SupabaseREST.request(

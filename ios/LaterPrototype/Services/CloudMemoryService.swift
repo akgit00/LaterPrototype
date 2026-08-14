@@ -251,20 +251,23 @@ nonisolated enum CloudMemoryService {
     // MARK: - Media upload
 
     /// Uploads a local file URL to Storage and returns its public URL. Remote
-    /// URLs (already-uploaded or external) are returned unchanged.
-    static func uploadIfLocal(_ urlString: String, userID: String, memoryID: UUID) async -> String {
-        guard let url = URL(string: urlString), url.isFileURL,
-              let data = try? Data(contentsOf: url) else {
-            return urlString
-        }
+    /// URLs (already-uploaded or external) are returned unchanged. THROWS when
+    /// the upload fails, so callers never mistake a device-local path for a
+    /// shared one.
+    static func uploadLocalFile(_ urlString: String, userID: String, memoryID: UUID) async throws -> String {
+        guard let url = URL(string: urlString), url.isFileURL else { return urlString }
+        let data = try Data(contentsOf: url)
         let ext = url.pathExtension.isEmpty ? "jpg" : url.pathExtension
         let contentType = ext.lowercased() == "mov" || ext.lowercased() == "mp4" ? "video/\(ext.lowercased())" : "image/jpeg"
         let path = "\(userID)/\(memoryID.uuidString)/\(UUID().uuidString).\(ext)"
-        do {
-            return try await SupabaseREST.uploadMedia(data, path: path, contentType: contentType)
-        } catch {
-            return urlString
-        }
+        return try await SupabaseREST.uploadMedia(data, path: path, contentType: contentType)
+    }
+
+    /// Best-effort variant of `uploadLocalFile`: falls back to the original
+    /// (local) URL when the upload fails. Used for payload media, where a local
+    /// path still renders on this device and is retried on every sync.
+    static func uploadIfLocal(_ urlString: String, userID: String, memoryID: UUID) async -> String {
+        (try? await uploadLocalFile(urlString, userID: userID, memoryID: memoryID)) ?? urlString
     }
 
     /// Replaces every local file URL inside a memory with an uploaded public URL.

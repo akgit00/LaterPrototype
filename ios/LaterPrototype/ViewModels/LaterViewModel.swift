@@ -50,6 +50,10 @@ final class LaterViewModel {
     /// middle of a post never wipes a just-typed comment off screen.
     private var pendingComments: [UUID: [Comment]] = [:]
 
+    /// Media rows whose local-file repair has already been attempted this
+    /// session, so the healing pass doesn't re-upload on every poll.
+    private var healedMediaRowIDs: Set<UUID> = []
+
     enum Tab: String {
         case explore
         case timeCapsules
@@ -122,6 +126,9 @@ final class LaterViewModel {
         await CloudMemoryService.ensureProfile(userID: userID, email: currentEmail, displayName: currentDisplayName)
         if let profile = try? await CloudMemoryService.fetchProfile(id: userID) {
             currentUsername = profile.username
+            if let name = profile.display_name, !name.isEmpty {
+                currentDisplayName = name
+            }
         }
         await loadConnections()
 
@@ -151,8 +158,11 @@ final class LaterViewModel {
         await pullCloudState(userID: userID)
     }
 
-    /// Pulls everything the user can see (own + shared memories) and merges in
-    /// the latest comments, media and playlists.
+    /// Pulls everything the user can see (own + shared memories), merges in the
+    /// latest shares, comments, media, playlists and songs, then publishes AT
+    /// MOST ONE state change. Merging before publishing is what stops the old
+    /// flicker: buttons glitching and photo counts jumping (e.g. 11 → 9 → 11)
+    /// on every background poll while intermediate states landed one by one.
     @MainActor
     private func pullCloudState(userID: String) async {
         do {
@@ -161,7 +171,7 @@ final class LaterViewModel {
             ownerByMemoryID = Dictionary(rows.map { ($0.id, $0.owner_id) }, uniquingKeysWith: { first, _ in first })
             // Cloud payloads carry a stale/empty comments array (comments live in
             // their own table). Carry over the comments we already have in memory
-            // so a poll never blanks a just-posted comment before loadComments runs.
+            // so a poll never blanks a just-posted comment before the merge runs.
             let existingComments = Dictionary(
                 memories.map { ($0.id, $0.comments) },
                 uniquingKeysWith: { first, _ in first }
@@ -175,26 +185,62 @@ final class LaterViewModel {
                 }
                 Self.stripUnreadableLocalMedia(from: &updated[index])
             }
-            // Only touch published state when something actually changed, so the
-            // periodic poll never causes visible flicker / button glitches.
+
+            let ids = updated.map { $0.id }
+            let shareRows = await fetchRows("People") { try await CloudMemoryService.fetchShares(memoryIDs: ids) }
+            let commentRows = await fetchRows("Comments") { try await CommentService.fetch(memoryIDs: ids) }
+            let mediaRows = await fetchRows("Media") { try await MediaService.fetch(memoryIDs: ids) }
+            let playlistRows = await fetchRows("Playlists") { try await PlaylistService.fetch(memoryIDs: ids) }
+            let songRows = await fetchRows("Songs") { try await SongService.fetch(memoryIDs: ids) }
+
+            // One profile lookup covering share recipients, comment authors, and
+            // the owners of memories shared with me (so guests can show them).
+            var profileIDs = Set(shareRows.map { $0.shared_with })
+            profileIDs.formUnion(commentRows.map { $0.author_id })
+            for (memoryID, ownerID) in ownerByMemoryID where !ownedMemoryIDs.contains(memoryID) {
+                profileIDs.insert(ownerID)
+            }
+            var profileByUUID: [UUID: CloudProfile] = [:]
+            if !profileIDs.isEmpty,
+               let profiles = try? await ConnectionService.profiles(ids: Array(profileIDs)) {
+                for profile in profiles {
+                    if let uuid = UUID(uuidString: profile.id) { profileByUUID[uuid] = profile }
+                }
+            }
+
+            mergeShares(into: &updated, rows: shareRows, profileByUUID: profileByUUID, userID: userID)
+            mergeComments(into: &updated, rows: commentRows, profileByUUID: profileByUUID)
+            mergeMedia(into: &updated, rows: mediaRows)
+            mergePlaylists(into: &updated, rows: playlistRows)
+            mergeSongs(into: &updated, rows: songRows)
+
             if updated != memories {
                 memories = updated
                 rebuildGlobalPins()
                 persist()
             }
-            await loadShares()
-            await loadComments()
-            await loadMedia()
-            await loadPlaylists()
-            await loadSongs()
+
+            healLocalMediaRows(mediaRows, userID: userID)
         } catch {
             syncError = error.localizedDescription
         }
     }
 
+    /// Fetches feature-table rows, surfacing (but never failing on) errors so
+    /// one broken table can't block the rest of the pull.
+    @MainActor
+    private func fetchRows<T>(_ label: String, _ operation: () async throws -> [T]) async -> [T] {
+        do {
+            return try await operation()
+        } catch {
+            syncError = "\(label): \(error.localizedDescription)"
+            return []
+        }
+    }
+
     /// Removes photo / video references that point at local files on ANOTHER
     /// device (they can never be displayed here). The shared, uploaded copies
-    /// are merged back in from the cloud media table by `loadMedia`.
+    /// are merged back in from the cloud media table by the media merge.
     nonisolated private static func stripUnreadableLocalMedia(from memory: inout Memory) {
         func isUnreadable(_ urlString: String) -> Bool {
             guard let url = URL(string: urlString), url.isFileURL else { return false }
@@ -228,220 +274,244 @@ final class LaterViewModel {
         }
     }
 
-    /// Pulls the share list for every visible memory and merges the recipients
-    /// into each memory's people list, so the number of people stays accurate
-    /// for everyone — including people added by someone other than the owner.
-    @MainActor
-    private func loadShares() async {
-        guard let userID = currentUserID, SupabaseREST.hasSession else { return }
-        let ids = memories.map { $0.id }
-        guard !ids.isEmpty else { return }
-        do {
-            let rows = try await CloudMemoryService.fetchShares(memoryIDs: ids)
-            guard !rows.isEmpty else { return }
-            let profiles = try await ConnectionService.profiles(ids: Array(Set(rows.map { $0.shared_with })))
-            var profileByUUID: [UUID: CloudProfile] = [:]
-            for profile in profiles {
-                if let uuid = UUID(uuidString: profile.id) { profileByUUID[uuid] = profile }
+    /// Merges share rows into each memory's people list, so the number of
+    /// people stays accurate for everyone — including the owner of a memory
+    /// shared with me, and people added by someone other than the owner.
+    private func mergeShares(
+        into updated: inout [Memory],
+        rows: [CloudMemoryService.ShareReadRow],
+        profileByUUID: [UUID: CloudProfile],
+        userID: String
+    ) {
+        let selfUUID = UUID(uuidString: userID)
+        let grouped = Dictionary(grouping: rows, by: { $0.memory_id })
+        for index in updated.indices {
+            let memoryID = updated[index].id
+            var connections = updated[index].connections
+            // Refresh names / avatars of people we already list.
+            connections = connections.map { existing in
+                guard let profile = profileByUUID[existing.id] else { return existing }
+                let name = profile.display_name?.isEmpty == false ? profile.display_name! : profile.username
+                return Connection(
+                    id: existing.id,
+                    username: profile.username,
+                    displayName: name,
+                    avatarColor: existing.avatarColor,
+                    avatarURL: profile.avatar_url
+                )
             }
-            let grouped = Dictionary(grouping: rows, by: { $0.memory_id })
-            var changed = false
-            for index in memories.indices {
-                var connections = memories[index].connections
-                // Refresh names / avatars of people we already list.
-                connections = connections.map { existing in
-                    guard let profile = profileByUUID[existing.id] else { return existing }
-                    let name = profile.display_name?.isEmpty == false ? profile.display_name! : profile.username
-                    return Connection(
-                        id: existing.id,
+            // On memories shared WITH me, the owner belongs in the people list.
+            if !ownedMemoryIDs.contains(memoryID),
+               let ownerID = ownerByMemoryID[memoryID],
+               let ownerUUID = UUID(uuidString: ownerID),
+               ownerUUID != selfUUID,
+               !connections.contains(where: { $0.id == ownerUUID }),
+               let profile = profileByUUID[ownerUUID] {
+                let name = profile.display_name?.isEmpty == false ? profile.display_name! : profile.username
+                connections.insert(
+                    Connection(
+                        id: ownerUUID,
                         username: profile.username,
                         displayName: name,
-                        avatarColor: existing.avatarColor,
+                        avatarColor: Self.color(for: ownerID),
+                        avatarURL: profile.avatar_url
+                    ),
+                    at: 0
+                )
+            }
+            // Merge in share recipients missing from the payload.
+            for row in grouped[memoryID] ?? [] {
+                guard let uuid = UUID(uuidString: row.shared_with),
+                      uuid != selfUUID,
+                      !connections.contains(where: { $0.id == uuid }),
+                      let profile = profileByUUID[uuid] else { continue }
+                let name = profile.display_name?.isEmpty == false ? profile.display_name! : profile.username
+                connections.append(
+                    Connection(
+                        id: uuid,
+                        username: profile.username,
+                        displayName: name,
+                        avatarColor: Self.color(for: profile.id),
                         avatarURL: profile.avatar_url
                     )
-                }
-                // Merge in share recipients missing from the payload.
-                for row in grouped[memories[index].id] ?? [] {
-                    guard let uuid = UUID(uuidString: row.shared_with),
-                          row.shared_with != userID,
-                          !connections.contains(where: { $0.id == uuid }),
-                          let profile = profileByUUID[uuid] else { continue }
-                    let name = profile.display_name?.isEmpty == false ? profile.display_name! : profile.username
-                    connections.append(
-                        Connection(
-                            id: uuid,
-                            username: profile.username,
-                            displayName: name,
-                            avatarColor: Self.color(for: profile.id),
-                            avatarURL: profile.avatar_url
+                )
+            }
+            if connections != updated[index].connections {
+                updated[index].connections = connections
+            }
+        }
+    }
+
+    /// Merges photos and videos from the media table, skipping rows that point
+    /// at files on another person's device — those can never load here, and
+    /// showing them produced "photo added but can't view it" placeholder tiles
+    /// plus photo counts that differed from person to person.
+    private func mergeMedia(into updated: inout [Memory], rows: [CloudMediaRow]) {
+        let grouped = Dictionary(grouping: rows, by: { $0.memory_id })
+        for index in updated.indices {
+            let mediaRows = grouped[updated[index].id] ?? []
+
+            var photos = updated[index].photoURLs
+            for row in mediaRows where row.kind == "photo" {
+                guard !Self.isUnreadableLocalURL(row.url) else { continue }
+                if !photos.contains(row.url) { photos.append(row.url) }
+            }
+            if photos != updated[index].photoURLs {
+                updated[index].photoURLs = photos
+            }
+
+            var videos = updated[index].videos
+            for row in mediaRows where row.kind == "video" {
+                let playable = !Self.isUnreadableLocalURL(row.url)
+                let thumb = row.thumbnail_url.flatMap { Self.isUnreadableLocalURL($0) ? nil : $0 }
+                if let existing = videos.firstIndex(where: { $0.id == row.id }) {
+                    // Backfill a playable cloud URL onto a video whose local
+                    // file lives on another device.
+                    if videos[existing].videoURL == nil, playable {
+                        videos[existing] = VideoAttachment(
+                            id: row.id,
+                            thumbnailURL: thumb ?? videos[existing].thumbnailURL,
+                            title: videos[existing].title,
+                            duration: row.duration ?? videos[existing].duration,
+                            videoURL: row.url
+                        )
+                    }
+                } else if playable, !videos.contains(where: { $0.videoURL == row.url }) {
+                    videos.append(
+                        VideoAttachment(
+                            id: row.id,
+                            thumbnailURL: thumb ?? "",
+                            title: "Video",
+                            duration: row.duration ?? "",
+                            videoURL: row.url
                         )
                     )
                 }
-                if connections != memories[index].connections {
-                    memories[index].connections = connections
-                    changed = true
-                }
             }
-            if changed { persist() }
-        } catch {
-            // Non-fatal: the payload's people list still renders.
+            if videos != updated[index].videos {
+                updated[index].videos = videos
+            }
         }
     }
 
-    /// Pulls photos and videos for every visible memory from the dedicated
-    /// media table and merges them in, so the owner and shared connections all
-    /// see the same media — no matter who added it.
-    @MainActor
-    private func loadMedia() async {
-        guard SupabaseREST.hasSession else { return }
-        let ids = memories.map { $0.id }
-        guard !ids.isEmpty else { return }
-        do {
-            let rows = try await MediaService.fetch(memoryIDs: ids)
-            let grouped = Dictionary(grouping: rows, by: { $0.memory_id })
-            var changed = false
-            for index in memories.indices {
-                let mediaRows = grouped[memories[index].id] ?? []
+    /// True when the string is a `file://` URL that can't be read on this
+    /// device (it lives on someone else's phone).
+    nonisolated private static func isUnreadableLocalURL(_ urlString: String) -> Bool {
+        guard let url = URL(string: urlString), url.isFileURL else { return false }
+        return !FileManager.default.fileExists(atPath: url.path)
+    }
 
-                var photos = memories[index].photoURLs
-                for row in mediaRows where row.kind == "photo" {
-                    if !photos.contains(row.url) { photos.append(row.url) }
-                }
-                if photos != memories[index].photoURLs {
-                    memories[index].photoURLs = photos
-                    changed = true
-                }
+    /// True when the string is a `file://` URL whose file exists on THIS device.
+    nonisolated private static func isReadableLocalFile(_ urlString: String) -> Bool {
+        guard let url = URL(string: urlString), url.isFileURL else { return false }
+        return FileManager.default.fileExists(atPath: url.path)
+    }
 
-                var videos = memories[index].videos
-                for row in mediaRows where row.kind == "video" {
-                    if let existing = videos.firstIndex(where: { $0.id == row.id }) {
-                        // Backfill a playable cloud URL onto a video whose local
-                        // file lives on another device.
-                        if videos[existing].videoURL == nil {
-                            videos[existing] = VideoAttachment(
-                                id: row.id,
-                                thumbnailURL: row.thumbnail_url ?? videos[existing].thumbnailURL,
-                                title: videos[existing].title,
-                                duration: row.duration ?? videos[existing].duration,
-                                videoURL: row.url
-                            )
-                        }
-                    } else if !videos.contains(where: { $0.videoURL == row.url }) {
-                        videos.append(
-                            VideoAttachment(
-                                id: row.id,
-                                thumbnailURL: row.thumbnail_url ?? "",
-                                title: "Video",
-                                duration: row.duration ?? "",
-                                videoURL: row.url
-                            )
-                        )
+    /// Repairs media rows that were stored with a path on THIS device (an
+    /// upload that failed at post time, before uploads were made strict).
+    /// Rows I authored on memories I don't own are re-uploaded and patched so
+    /// everyone can finally see them; rows on my own memories are removed
+    /// because the memory payload already carries (and re-uploads) that media.
+    private func healLocalMediaRows(_ rows: [CloudMediaRow], userID: String) {
+        let work = rows.filter { row in
+            row.author_id.lowercased() == userID.lowercased()
+                && !healedMediaRowIDs.contains(row.id)
+                && (Self.isReadableLocalFile(row.url)
+                    || (row.thumbnail_url.map(Self.isReadableLocalFile) ?? false))
+        }
+        guard !work.isEmpty else { return }
+        healedMediaRowIDs.formUnion(work.map { $0.id })
+        let owned = ownedMemoryIDs
+        Task {
+            for row in work {
+                if owned.contains(row.memory_id) {
+                    if row.kind == "photo" {
+                        try? await MediaService.deletePhoto(memoryID: row.memory_id, url: row.url)
+                    } else {
+                        try? await MediaService.deleteVideo(id: row.id)
                     }
+                    continue
                 }
-                if videos != memories[index].videos {
-                    memories[index].videos = videos
-                    changed = true
+                var newURL: String?
+                var newThumb: String?
+                if Self.isReadableLocalFile(row.url) {
+                    newURL = try? await CloudMemoryService.uploadLocalFile(row.url, userID: userID, memoryID: row.memory_id)
+                }
+                if let thumb = row.thumbnail_url, Self.isReadableLocalFile(thumb) {
+                    newThumb = try? await CloudMemoryService.uploadLocalFile(thumb, userID: userID, memoryID: row.memory_id)
+                }
+                if newURL != nil || newThumb != nil {
+                    try? await MediaService.updateURLs(id: row.id, url: newURL, thumbnailURL: newThumb)
                 }
             }
-            if changed { persist() }
-        } catch {
-            syncError = error.localizedDescription
         }
     }
 
-    /// Pulls comments for every visible memory from the dedicated comments
-    /// table and merges them in, so the owner and shared connections all see
-    /// the same conversation.
-    @MainActor
-    private func loadComments() async {
-        guard SupabaseREST.hasSession else { return }
-        let ids = memories.map { $0.id }
-        guard !ids.isEmpty else { return }
-        do {
-            let rows = try await CommentService.fetch(memoryIDs: ids)
-            let grouped = Dictionary(grouping: rows, by: { $0.memory_id })
-            var changed = false
-            for index in memories.indices {
-                let memoryID = memories[index].id
-                var comments = (grouped[memoryID] ?? []).map {
-                    Comment(id: $0.id, username: $0.username, text: $0.text, date: $0.created_at)
+    /// Merges comments from the comments table, showing each author's current
+    /// chosen name (falling back to the stored @username for accounts that
+    /// never picked one).
+    private func mergeComments(
+        into updated: inout [Memory],
+        rows: [CloudCommentRow],
+        profileByUUID: [UUID: CloudProfile]
+    ) {
+        let grouped = Dictionary(grouping: rows, by: { $0.memory_id })
+        for index in updated.indices {
+            let memoryID = updated[index].id
+            var comments = (grouped[memoryID] ?? []).map { row in
+                var shown = row.username
+                if let authorUUID = UUID(uuidString: row.author_id),
+                   let profile = profileByUUID[authorUUID],
+                   let displayName = profile.display_name, !displayName.isEmpty {
+                    shown = displayName
                 }
-                // Re-add any optimistic comments the server hasn't confirmed yet,
-                // so a poll mid-post never makes a fresh comment vanish.
-                if let pending = pendingComments[memoryID] {
-                    for comment in pending where !comments.contains(where: { $0.id == comment.id }) {
-                        comments.append(comment)
-                    }
-                }
-                // Merge in any comment we already display that the server didn't
-                // return yet (eventual consistency right after posting), so a
-                // confirmed comment never flickers out between polls.
-                for comment in memories[index].comments
-                where !comments.contains(where: { $0.id == comment.id }) {
+                return Comment(id: row.id, username: shown, text: row.text, date: row.created_at)
+            }
+            // Re-add any optimistic comments the server hasn't confirmed yet,
+            // so a poll mid-post never makes a fresh comment vanish.
+            if let pending = pendingComments[memoryID] {
+                for comment in pending where !comments.contains(where: { $0.id == comment.id }) {
                     comments.append(comment)
                 }
-                let sorted = comments.sorted { $0.date < $1.date }
-                if sorted != memories[index].comments {
-                    memories[index].comments = sorted
-                    changed = true
-                }
             }
-            if changed { persist() }
-        } catch {
-            syncError = error.localizedDescription
+            // Merge in any comment we already display that the server didn't
+            // return yet (eventual consistency right after posting), so a
+            // confirmed comment never flickers out between polls.
+            for comment in updated[index].comments
+            where !comments.contains(where: { $0.id == comment.id }) {
+                comments.append(comment)
+            }
+            let sorted = comments.sorted { $0.date < $1.date }
+            if sorted != updated[index].comments {
+                updated[index].comments = sorted
+            }
         }
     }
 
-    /// Pulls individual songs for every visible memory from the dedicated songs
-    /// table and merges them in, so the owner and shared connections all see the
-    /// same songs — no matter who added them.
-    @MainActor
-    private func loadSongs() async {
-        guard SupabaseREST.hasSession else { return }
-        let ids = memories.map { $0.id }
-        guard !ids.isEmpty else { return }
-        do {
-            let rows = try await SongService.fetch(memoryIDs: ids)
-            let grouped = Dictionary(grouping: rows, by: { $0.memory_id })
-            var changed = false
-            for index in memories.indices {
-                let songRows = grouped[memories[index].id] ?? []
-                var songs = memories[index].songs
-                for row in songRows where !songs.contains(where: { $0.id == row.id }) {
-                    songs.append(row.payload)
-                }
-                if songs != memories[index].songs {
-                    memories[index].songs = songs
-                    changed = true
-                }
+    /// Merges individual songs from the songs table, so the owner and shared
+    /// connections all see the same songs — no matter who added them.
+    private func mergeSongs(into updated: inout [Memory], rows: [CloudSongRow]) {
+        let grouped = Dictionary(grouping: rows, by: { $0.memory_id })
+        for index in updated.indices {
+            let songRows = grouped[updated[index].id] ?? []
+            var songs = updated[index].songs
+            for row in songRows where !songs.contains(where: { $0.id == row.id }) {
+                songs.append(row.payload)
             }
-            if changed { persist() }
-        } catch {
-            syncError = error.localizedDescription
+            if songs != updated[index].songs {
+                updated[index].songs = songs
+            }
         }
     }
 
-    /// Pulls the linked playlist for every visible memory from the dedicated
-    /// playlists table and merges it in, so the owner and shared connections all
-    /// see the same playlist — no matter who linked it.
-    @MainActor
-    private func loadPlaylists() async {
-        guard SupabaseREST.hasSession else { return }
-        let ids = memories.map { $0.id }
-        guard !ids.isEmpty else { return }
-        do {
-            let rows = try await PlaylistService.fetch(memoryIDs: ids)
-            let byMemory = Dictionary(rows.map { ($0.memory_id, $0.payload) }, uniquingKeysWith: { first, _ in first })
-            var changed = false
-            for index in memories.indices {
-                if let playlist = byMemory[memories[index].id], playlist != memories[index].playlist {
-                    memories[index].playlist = playlist
-                    changed = true
-                }
+    /// Merges the linked playlist from the playlists table, so the owner and
+    /// shared connections all see the same playlist — no matter who linked it.
+    private func mergePlaylists(into updated: inout [Memory], rows: [CloudPlaylistRow]) {
+        let byMemory = Dictionary(rows.map { ($0.memory_id, $0.payload) }, uniquingKeysWith: { first, _ in first })
+        for index in updated.indices {
+            if let playlist = byMemory[updated[index].id], playlist != updated[index].playlist {
+                updated[index].playlist = playlist
             }
-            if changed { persist() }
-        } catch {
-            syncError = error.localizedDescription
         }
     }
 
@@ -613,11 +683,17 @@ final class LaterViewModel {
         commentError = nil
         // The username may not be resolved yet right after launch — fetch it so
         // comments are never posted under a placeholder name.
-        if currentUsername == nil, let userID = currentUserID, SupabaseREST.hasSession {
-            currentUsername = ((try? await CloudMemoryService.fetchProfile(id: userID)) ?? nil)?.username
+        if currentUsername == nil, let userID = currentUserID, SupabaseREST.hasSession,
+           let profile = (try? await CloudMemoryService.fetchProfile(id: userID)) ?? nil {
+            currentUsername = profile.username
+            if let fetched = profile.display_name, !fetched.isEmpty {
+                currentDisplayName = fetched
+            }
         }
         let emailFallback = currentEmail.split(separator: "@").first.map(String.init)
-        let name = currentUsername ?? emailFallback ?? "You"
+        // Comments show the user's chosen name, not their @username.
+        let chosenName = currentDisplayName?.isEmpty == false ? currentDisplayName : nil
+        let name = chosenName ?? currentUsername ?? emailFallback ?? "You"
         // Optimistically show the comment immediately, and track it as pending so
         // a concurrent poll can't wipe it before the server confirms.
         let local = Comment(username: name, text: trimmed)
@@ -665,13 +741,20 @@ final class LaterViewModel {
         persist()
 
         guard let userID = currentUserID, SupabaseREST.hasSession else { return }
-        let publicURL = await CloudMemoryService.uploadIfLocal(localURL, userID: userID, memoryID: memoryID)
-        if let i = memories.firstIndex(where: { $0.id == memoryID }),
-           let p = memories[i].photoURLs.firstIndex(of: localURL) {
-            memories[i].photoURLs[p] = publicURL
-            persist()
+        do {
+            let publicURL = try await CloudMemoryService.uploadLocalFile(localURL, userID: userID, memoryID: memoryID)
+            if let i = memories.firstIndex(where: { $0.id == memoryID }),
+               let p = memories[i].photoURLs.firstIndex(of: localURL) {
+                memories[i].photoURLs[p] = publicURL
+                persist()
+            }
+            try await MediaService.postPhoto(memoryID: memoryID, url: publicURL)
+        } catch {
+            // Never record a device-local path in the shared media table — other
+            // people would count the photo but couldn't display it. Keep the
+            // local copy on screen and surface what went wrong.
+            syncError = "Photo upload failed: \(error.localizedDescription)"
         }
-        try? await MediaService.postPhoto(memoryID: memoryID, url: publicURL)
         if isOwned(memoryID) { await pushMemory(memoryID) }
     }
 
@@ -685,31 +768,37 @@ final class LaterViewModel {
         persist()
 
         guard let userID = currentUserID, SupabaseREST.hasSession else { return }
-        let thumb = await CloudMemoryService.uploadIfLocal(video.thumbnailURL, userID: userID, memoryID: memoryID)
-        var publicVideoURL: String?
-        if let original = video.videoURL {
-            publicVideoURL = await CloudMemoryService.uploadIfLocal(original, userID: userID, memoryID: memoryID)
-        }
-        let uploaded = VideoAttachment(
-            id: video.id,
-            thumbnailURL: thumb,
-            title: video.title,
-            duration: video.duration,
-            videoURL: publicVideoURL
-        )
-        if let i = memories.firstIndex(where: { $0.id == memoryID }),
-           let v = memories[i].videos.firstIndex(where: { $0.id == video.id }) {
-            memories[i].videos[v] = uploaded
-            persist()
-        }
-        if let publicVideoURL {
-            try? await MediaService.postVideo(
-                memoryID: memoryID,
+        do {
+            let thumb = try await CloudMemoryService.uploadLocalFile(video.thumbnailURL, userID: userID, memoryID: memoryID)
+            var publicVideoURL: String?
+            if let original = video.videoURL {
+                publicVideoURL = try await CloudMemoryService.uploadLocalFile(original, userID: userID, memoryID: memoryID)
+            }
+            let uploaded = VideoAttachment(
                 id: video.id,
-                url: publicVideoURL,
                 thumbnailURL: thumb,
-                duration: video.duration
+                title: video.title,
+                duration: video.duration,
+                videoURL: publicVideoURL
             )
+            if let i = memories.firstIndex(where: { $0.id == memoryID }),
+               let v = memories[i].videos.firstIndex(where: { $0.id == video.id }) {
+                memories[i].videos[v] = uploaded
+                persist()
+            }
+            if let publicVideoURL {
+                try await MediaService.postVideo(
+                    memoryID: memoryID,
+                    id: video.id,
+                    url: publicVideoURL,
+                    thumbnailURL: thumb,
+                    duration: video.duration
+                )
+            }
+        } catch {
+            // Same rule as photos: never share a device-local path. Keep the
+            // local copy playable here and surface the failure.
+            syncError = "Video upload failed: \(error.localizedDescription)"
         }
         if isOwned(memoryID) { await pushMemory(memoryID) }
     }
