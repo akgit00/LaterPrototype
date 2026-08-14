@@ -25,6 +25,7 @@ struct MemoryRoomView: View {
     @State private var playingVideoURL: URL?
     @State private var showDeleteMemoryConfirm: Bool = false
     @State private var isStartingSoundtrack: Bool = false
+    @State private var soundtrackMessage: String?
 
     private var previewPlayer: PreviewPlayerService { .shared }
 
@@ -36,6 +37,12 @@ struct MemoryRoomView: View {
     /// linked playlist's tracks.
     private var memorySoundtrack: [PlaylistTrack] {
         memory.songs + (memory.playlist?.tracks ?? [])
+    }
+
+    /// Whether any music is attached at all — including a playlist whose
+    /// track list hasn't been loaded yet (linked from just a URL).
+    private var hasMusicAttached: Bool {
+        memory.playlist != nil || !memory.songs.isEmpty
     }
 
     /// The attached track whose clip is currently playing, if any.
@@ -199,9 +206,20 @@ struct MemoryRoomView: View {
                 .padding(.top, 2)
             }
 
-            if !memorySoundtrack.isEmpty {
+            if hasMusicAttached {
                 soundtrackButton
                     .padding(.top, 6)
+            }
+
+            if let soundtrackMessage {
+                Text(soundtrackMessage)
+                    .font(.caption2)
+                    .foregroundStyle(.white)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(.black.opacity(0.45), in: .capsule)
+                    .padding(.horizontal, 24)
             }
         }
         .padding(.top, 4)
@@ -224,7 +242,7 @@ struct MemoryRoomView: View {
                     ProgressView()
                         .controlSize(.mini)
                         .tint(.white)
-                    Text("Finding a clip…")
+                    Text(memorySoundtrack.isEmpty ? "Loading songs…" : "Finding a clip…")
                 } else {
                     Image(systemName: "play.fill")
                     Text("Play a song")
@@ -249,10 +267,57 @@ struct MemoryRoomView: View {
         }
         isStartingSoundtrack = true
         defer { isStartingSoundtrack = false }
-        for track in memorySoundtrack.shuffled() {
+        soundtrackMessage = nil
+
+        var tracks = memorySoundtrack
+        if tracks.isEmpty {
+            tracks = await loadPlaylistTracks()
+        }
+        guard !tracks.isEmpty else { return }
+
+        for track in tracks.shuffled() {
             await previewPlayer.toggle(track)
             if previewPlayer.activeTrackID == track.id { return }
         }
+        soundtrackMessage = "Couldn't find playable clips for these songs."
+    }
+
+    /// A playlist linked from just a URL is saved without its track list.
+    /// Loads the tracks on demand — through the Spotify API when the account
+    /// is connected, otherwise through Spotify's public embed page — then
+    /// saves them so the playlist shows its songs for everyone.
+    private func loadPlaylistTracks() async -> [PlaylistTrack] {
+        guard
+            let playlist = memory.playlist,
+            let link = playlist.externalURL,
+            SpotifyService.playlistID(from: link) != nil
+        else {
+            soundtrackMessage = "This playlist has no songs loaded yet — add songs to this memory to play them here."
+            return []
+        }
+
+        var tracks: [PlaylistTrack] = []
+        if SpotifyConfig.isConfigured, SpotifyService.shared.isConnected {
+            let imported = try? await SpotifyService.shared.importPlaylist(fromURL: link)
+            tracks = imported?.tracks ?? []
+        }
+        if tracks.isEmpty {
+            tracks = (try? await SpotifyService.fetchPublicPlaylistTracks(for: link)) ?? []
+        }
+        guard !tracks.isEmpty else {
+            soundtrackMessage = "Couldn't load this playlist's songs. Make sure it's public on Spotify, or add songs to the memory."
+            return []
+        }
+
+        let updated = PlaylistAttachment(
+            name: playlist.name,
+            source: playlist.source,
+            coverURL: playlist.coverURL,
+            tracks: tracks,
+            externalURL: playlist.externalURL
+        )
+        viewModel.setPlaylist(for: memoryID, playlist: updated)
+        return tracks
     }
 }
 

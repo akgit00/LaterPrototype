@@ -383,6 +383,62 @@ final class SpotifyService: NSObject {
         return try JSONDecoder().decode(OEmbedInfo.self, from: data)
     }
 
+    // MARK: - Public embed lookup (no sign-in required)
+
+    /// Fetches a public playlist's tracks from Spotify's embed page, which is
+    /// readable without any account or API credentials. Best effort: returns
+    /// an empty list if Spotify changes the page format.
+    nonisolated static func fetchPublicPlaylistTracks(for urlString: String) async throws -> [PlaylistTrack] {
+        guard
+            let id = playlistID(from: urlString),
+            let url = URL(string: "https://open.spotify.com/embed/playlist/\(id)")
+        else {
+            throw SpotifyError.invalidResponse
+        }
+        var request = URLRequest(url: url)
+        request.setValue(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+            forHTTPHeaderField: "User-Agent"
+        )
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard
+            let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+            let html = String(data: data, encoding: .utf8)
+        else {
+            throw SpotifyError.invalidResponse
+        }
+        return embedTracks(fromHTML: html)
+    }
+
+    /// Pulls the track list out of the embed page's JSON payload.
+    nonisolated private static func embedTracks(fromHTML html: String) -> [PlaylistTrack] {
+        guard
+            let start = html.range(of: "<script id=\"__NEXT_DATA__\" type=\"application/json\">"),
+            let end = html.range(of: "</script>", range: start.upperBound..<html.endIndex),
+            let jsonData = String(html[start.upperBound..<end.lowerBound]).data(using: .utf8),
+            let root = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any]
+        else {
+            return []
+        }
+        let props = root["props"] as? [String: Any]
+        let pageProps = props?["pageProps"] as? [String: Any]
+        let state = pageProps?["state"] as? [String: Any]
+        let dataDict = state?["data"] as? [String: Any]
+        let entity = dataDict?["entity"] as? [String: Any]
+        guard let trackList = entity?["trackList"] as? [[String: Any]] else { return [] }
+
+        return trackList.compactMap { item in
+            guard let title = item["title"] as? String, !title.isEmpty else { return nil }
+            let artist = item["subtitle"] as? String ?? ""
+            var duration = ""
+            if let ms = item["duration"] as? Int {
+                let totalSeconds = ms / 1000
+                duration = String(format: "%d:%02d", totalSeconds / 60, totalSeconds % 60)
+            }
+            return PlaylistTrack(title: title, artist: artist, duration: duration)
+        }
+    }
+
     // MARK: - Helpers
 
     private static func formatDuration(_ ms: Int?) -> String {
