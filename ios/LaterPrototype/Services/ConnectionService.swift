@@ -70,6 +70,29 @@ nonisolated enum ConnectionService {
         )
     }
 
+    /// Searches profiles by @username or display name (case-insensitive,
+    /// partial matches). Backs the user search tab.
+    static func searchProfiles(matching rawQuery: String, limit: Int = 25) async throws -> [CloudProfile] {
+        var query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if query.hasPrefix("@") { query.removeFirst() }
+        // Keep only characters that can't break the PostgREST or=() syntax.
+        query = String(query.filter { $0.isLetter || $0.isNumber || $0 == " " || $0 == "_" || $0 == "-" || $0 == "." })
+        guard !query.isEmpty else { return [] }
+
+        let pattern = "*\(query)*"
+        let data = try await SupabaseREST.request(
+            path: "profiles",
+            method: "GET",
+            query: [
+                URLQueryItem(name: "or", value: "(username.ilike.\(pattern),display_name.ilike.\(pattern))"),
+                URLQueryItem(name: "select", value: "id,username,display_name,email,bio,avatar_url"),
+                URLQueryItem(name: "order", value: "username.asc"),
+                URLQueryItem(name: "limit", value: "\(limit)"),
+            ]
+        )
+        return try SupabaseREST.makeDecoder().decode([CloudProfile].self, from: data)
+    }
+
     /// Bulk-fetches profiles for the given user ids (used to resolve names/usernames).
     static func profiles(ids: [String]) async throws -> [CloudProfile] {
         guard !ids.isEmpty else { return [] }

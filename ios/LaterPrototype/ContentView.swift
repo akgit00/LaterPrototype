@@ -13,11 +13,15 @@ struct ContentView: View {
                 WorldMapView(viewModel: viewModel)
             }
 
-            Tab("Capsules", systemImage: "envelope.badge.shield.half.filled", value: 1) {
+            Tab("Search", systemImage: "magnifyingglass", value: 1) {
+                UserSearchView(viewModel: viewModel)
+            }
+
+            Tab("Capsules", systemImage: "envelope.badge.shield.half.filled", value: 2) {
                 TimeCapsuleView()
             }
 
-            Tab("Profile", systemImage: "person.crop.circle", value: 2) {
+            Tab("Profile", systemImage: "person.crop.circle", value: 3) {
                 ProfileView(viewModel: viewModel)
             }
             .badge(viewModel.totalUnread)
