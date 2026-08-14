@@ -24,9 +24,24 @@ struct MemoryRoomView: View {
     @State private var addressPin: MemoryPin?
     @State private var playingVideoURL: URL?
     @State private var showDeleteMemoryConfirm: Bool = false
+    @State private var isStartingSoundtrack: Bool = false
+
+    private var previewPlayer: PreviewPlayerService { .shared }
 
     private var memory: Memory {
         viewModel.memoryByID(memoryID) ?? Memory(title: "", centerCoordinate: CLLocationCoordinate2D())
+    }
+
+    /// Every playable track attached to this memory: individual songs plus the
+    /// linked playlist's tracks.
+    private var memorySoundtrack: [PlaylistTrack] {
+        memory.songs + (memory.playlist?.tracks ?? [])
+    }
+
+    /// The attached track whose clip is currently playing, if any.
+    private var playingMemoryTrack: PlaylistTrack? {
+        guard let activeID = previewPlayer.activeTrackID else { return nil }
+        return memorySoundtrack.first { $0.id == activeID }
     }
 
     init(memoryID: UUID, viewModel: LaterViewModel) {
@@ -183,8 +198,61 @@ struct MemoryRoomView: View {
                 .contentMargins(.horizontal, 0)
                 .padding(.top, 2)
             }
+
+            if !memorySoundtrack.isEmpty {
+                soundtrackButton
+                    .padding(.top, 6)
+            }
         }
         .padding(.top, 4)
+    }
+
+    /// Shuffle-play for the memory's music: taps play a random attached
+    /// song's clip; tapping again stops it.
+    private var soundtrackButton: some View {
+        Button {
+            Task { await toggleSoundtrack() }
+        } label: {
+            HStack(spacing: 7) {
+                if let track = playingMemoryTrack {
+                    Image(systemName: "waveform")
+                        .symbolEffect(.variableColor.iterative)
+                    Text(track.title)
+                        .lineLimit(1)
+                    Image(systemName: "stop.fill")
+                } else if isStartingSoundtrack {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .tint(.white)
+                    Text("Finding a clip…")
+                } else {
+                    Image(systemName: "play.fill")
+                    Text("Play a song")
+                }
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.ultraThinMaterial, in: .capsule)
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: 260)
+    }
+
+    /// Plays a random attached song, retrying other tracks when one has no
+    /// clip available, or stops the one currently playing.
+    private func toggleSoundtrack() async {
+        if playingMemoryTrack != nil {
+            previewPlayer.stop()
+            return
+        }
+        isStartingSoundtrack = true
+        defer { isStartingSoundtrack = false }
+        for track in memorySoundtrack.shuffled() {
+            await previewPlayer.toggle(track)
+            if previewPlayer.activeTrackID == track.id { return }
+        }
     }
 }
 
