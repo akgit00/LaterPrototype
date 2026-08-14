@@ -9,11 +9,13 @@ struct EmailAuthView: View {
     enum Mode {
         case password
         case code
+        case reset
     }
 
     enum Step {
         case enterEmail
         case enterCode
+        case newPassword
     }
 
     @State private var mode: Mode = .code
@@ -22,10 +24,11 @@ struct EmailAuthView: View {
     @State private var email = ""
     @State private var password = ""
     @State private var code = ""
+    @State private var newPassword = ""
     @FocusState private var focused: Field?
 
     enum Field {
-        case email, password, code
+        case email, password, code, newPassword
     }
 
     private var trimmedEmail: String {
@@ -49,10 +52,10 @@ struct EmailAuthView: View {
                     VStack(spacing: 24) {
                         header
 
-                        if mode == .password {
-                            passwordForm
-                        } else {
-                            codeForm
+                        switch mode {
+                        case .password: passwordForm
+                        case .code: codeForm
+                        case .reset: resetForm
                         }
 
                         if let notice = auth.notice {
@@ -95,6 +98,7 @@ struct EmailAuthView: View {
         switch mode {
         case .password: return isSignUp ? "Create account" : "Sign in"
         case .code: return "Email me a code"
+        case .reset: return "Reset password"
         }
     }
 
@@ -102,7 +106,7 @@ struct EmailAuthView: View {
 
     private var header: some View {
         VStack(spacing: 8) {
-            Image(systemName: mode == .code ? "envelope.badge.fill" : "lock.fill")
+            Image(systemName: headerIcon)
                 .font(.system(size: 32, weight: .medium))
                 .foregroundStyle(.white)
                 .frame(width: 64, height: 64)
@@ -117,6 +121,14 @@ struct EmailAuthView: View {
         .padding(.top, 8)
     }
 
+    private var headerIcon: String {
+        switch mode {
+        case .password: return "lock.fill"
+        case .code: return "envelope.badge.fill"
+        case .reset: return "key.fill"
+        }
+    }
+
     private var headerSubtitle: String {
         switch mode {
         case .password:
@@ -125,6 +137,12 @@ struct EmailAuthView: View {
             return step == .enterEmail
                 ? "We'll email you a 6-digit code to sign in — no password needed."
                 : "Enter the 6-digit code we sent to \(trimmedEmail)."
+        case .reset:
+            switch step {
+            case .enterEmail: return "Enter your account email and we'll send you a 6-digit reset code."
+            case .enterCode: return "Enter the 6-digit code we sent to \(trimmedEmail)."
+            case .newPassword: return "Code verified — choose a new password."
+            }
         }
     }
 
@@ -162,6 +180,18 @@ struct EmailAuthView: View {
             }
             .disabled(!canSubmitPassword)
             .opacity(canSubmitPassword ? 1 : 0.5)
+
+            if !isSignUp {
+                Button {
+                    withAnimation { mode = .reset; step = .enterEmail; auth.notice = nil }
+                    code = ""
+                    newPassword = ""
+                } label: {
+                    Text("Forgot password?")
+                        .font(.footnote.weight(.medium))
+                        .foregroundStyle(.white.opacity(0.85))
+                }
+            }
 
             Button {
                 withAnimation { isSignUp.toggle(); auth.notice = nil }
@@ -251,6 +281,111 @@ struct EmailAuthView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "lock.fill")
                     Text("Use a password instead")
+                }
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .frame(height: 50)
+                .background(.white.opacity(0.1), in: .rect(cornerRadius: 14))
+            }
+        }
+    }
+
+    // MARK: - Reset password form
+
+    private var resetForm: some View {
+        VStack(spacing: 16) {
+            if step == .enterEmail {
+                field(
+                    "Email",
+                    text: $email,
+                    field: .email,
+                    keyboard: .emailAddress,
+                    content: .username
+                )
+
+                Button {
+                    auth.notice = nil
+                    Task {
+                        let sent = await auth.sendPasswordResetCode(email: trimmedEmail)
+                        if sent {
+                            code = ""
+                            withAnimation { step = .enterCode }
+                            focused = .code
+                        }
+                    }
+                } label: {
+                    primaryLabel("Send reset code")
+                }
+                .disabled(!isEmailValid || auth.isSigningIn)
+                .opacity(isEmailValid && !auth.isSigningIn ? 1 : 0.5)
+            } else if step == .enterCode {
+                field(
+                    "6-digit code",
+                    text: $code,
+                    field: .code,
+                    keyboard: .numberPad,
+                    content: .oneTimeCode
+                )
+
+                Button {
+                    Task {
+                        let verified = await auth.verifyPasswordResetCode(
+                            email: trimmedEmail,
+                            code: code.trimmingCharacters(in: .whitespaces)
+                        )
+                        if verified {
+                            withAnimation { step = .newPassword }
+                            focused = .newPassword
+                        }
+                    }
+                } label: {
+                    primaryLabel("Verify code")
+                }
+                .disabled(code.count < 6 || auth.isSigningIn)
+                .opacity(code.count >= 6 && !auth.isSigningIn ? 1 : 0.5)
+
+                Button {
+                    auth.notice = nil
+                    Task { _ = await auth.sendPasswordResetCode(email: trimmedEmail) }
+                } label: {
+                    Text("Resend code")
+                        .font(.footnote)
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+            } else {
+                field(
+                    "New password",
+                    text: $newPassword,
+                    field: .newPassword,
+                    isSecure: true,
+                    content: .newPassword
+                )
+
+                Text("At least 6 characters.")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.4))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                Button {
+                    Task { await auth.completePasswordReset(newPassword: newPassword) }
+                } label: {
+                    primaryLabel("Save & sign in")
+                }
+                .disabled(newPassword.count < 6 || auth.isSigningIn)
+                .opacity(newPassword.count >= 6 && !auth.isSigningIn ? 1 : 0.5)
+            }
+
+            divider
+
+            Button {
+                withAnimation { mode = .password; step = .enterEmail; auth.notice = nil }
+                code = ""
+                newPassword = ""
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.left")
+                    Text("Back to sign in")
                 }
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.white)

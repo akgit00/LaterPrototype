@@ -24,6 +24,9 @@ class AuthManager {
     private let anonKey = SupabaseConfig.anonKey
     private var currentNonce: String?
     private var webAuthSession: ASWebAuthenticationSession?
+    /// Session obtained from a verified password-reset code. Held privately
+    /// until the new password is saved, then promoted to a real sign-in.
+    private var pendingRecoverySession: SupabaseSession?
 
     private let accessKey = "sb_access_token"
     private let refreshKey = "sb_refresh_token"
@@ -220,6 +223,113 @@ class AuthManager {
             setError(error.errorDescription ?? "Invalid or expired code")
         } catch {
             setError("Invalid or expired code. Please try again.")
+        }
+    }
+
+    // MARK: - Password reset
+
+    /// Emails a 6-digit password-reset code to the given address.
+    /// Returns `true` if the email was dispatched successfully.
+    @MainActor
+    func sendPasswordResetCode(email: String) async -> Bool {
+        guard SupabaseConfig.isConfigured else {
+            setError("Supabase isn't configured yet. Add your project URL and anon key.")
+            return false
+        }
+        guard let url = URL(string: "\(baseURL)/auth/v1/recover") else {
+            setError("Invalid Supabase URL")
+            return false
+        }
+
+        isSigningIn = true
+        defer { isSigningIn = false }
+
+        do {
+            let (data, http) = try await postRaw(url: url, body: ["email": email])
+            guard http.statusCode == 200 else {
+                throw decodeError(from: data, statusCode: http.statusCode)
+            }
+            return true
+        } catch let error as AuthError {
+            setError(error.errorDescription ?? "Couldn't send the reset code")
+            return false
+        } catch {
+            setError("Couldn't send the reset code: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// Verifies the 6-digit reset code. On success the session is held
+    /// privately (the user isn't signed in yet) so the flow can continue to
+    /// choosing a new password. Returns `true` when the code is valid.
+    @MainActor
+    func verifyPasswordResetCode(email: String, code: String) async -> Bool {
+        guard let url = URL(string: "\(baseURL)/auth/v1/verify") else {
+            setError("Invalid Supabase URL")
+            return false
+        }
+
+        isSigningIn = true
+        defer { isSigningIn = false }
+
+        do {
+            let (data, http) = try await postRaw(
+                url: url,
+                body: ["email": email, "token": code, "type": "recovery"]
+            )
+            guard http.statusCode == 200 else {
+                throw decodeError(from: data, statusCode: http.statusCode)
+            }
+            pendingRecoverySession = try JSONDecoder().decode(SupabaseSession.self, from: data)
+            return true
+        } catch let error as AuthError {
+            setError(error.errorDescription ?? "Invalid or expired code")
+            return false
+        } catch {
+            setError("Invalid or expired code. Please try again.")
+            return false
+        }
+    }
+
+    /// Saves the new password using the session from the verified reset code,
+    /// then signs the user in with it.
+    @MainActor
+    func completePasswordReset(newPassword: String) async {
+        guard let session = pendingRecoverySession else {
+            setError("Your reset session expired. Request a new code.")
+            return
+        }
+        guard let url = URL(string: "\(baseURL)/auth/v1/user") else {
+            setError("Invalid Supabase URL")
+            return
+        }
+
+        isSigningIn = true
+        defer { isSigningIn = false }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(anonKey, forHTTPHeaderField: "apikey")
+        request.setValue("Bearer \(session.access_token)", forHTTPHeaderField: "Authorization")
+
+        do {
+            request.httpBody = try JSONEncoder().encode(["password": newPassword])
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw AuthError.serverError(statusCode: -1)
+            }
+            guard http.statusCode == 200 else {
+                throw decodeError(from: data, statusCode: http.statusCode)
+            }
+            pendingRecoverySession = nil
+            storeSession(accessToken: session.access_token, refreshToken: session.refresh_token)
+            user = makeUser(from: session, fallbackName: nil)
+            notice = nil
+        } catch let error as AuthError {
+            setError(error.errorDescription ?? "Couldn't update your password")
+        } catch {
+            setError("Couldn't update your password: \(error.localizedDescription)")
         }
     }
 
