@@ -23,6 +23,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        // Present foreground banners (except for the chat currently open).
+        UNUserNotificationCenter.current().delegate = NotificationCenterDelegate.shared
         // Kick off permission request early so the system prompt can appear
         // as soon as the user is signed in.
         PushNotificationService.shared.requestPermissionIfNeeded()

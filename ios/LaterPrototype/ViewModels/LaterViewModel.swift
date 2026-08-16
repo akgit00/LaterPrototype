@@ -25,7 +25,9 @@ final class LaterViewModel {
     /// The friend whose chat is currently open on screen. Their messages are
     /// never counted as unread, so opening a conversation reliably clears its
     /// notification badge.
-    var activeChatFriendID: UUID?
+    var activeChatFriendID: UUID? {
+        didSet { NotificationCenterDelegate.shared.activeThreadID = activeChatFriendID?.uuidString.lowercased() }
+    }
 
     /// Whether this user reports read receipts to their friends. When off,
     /// conversations they open are never marked as read for the other person.
@@ -720,6 +722,11 @@ final class LaterViewModel {
         do {
             let row = try await CommentService.post(memoryID: memoryID, username: name, text: trimmed)
             pendingComments[memoryID]?.removeAll { $0.id == local.id }
+            notifyMemoryParticipants(
+                memoryID: memoryID,
+                title: memoryByID(memoryID)?.title ?? "New comment",
+                body: "\(name): \(trimmed)"
+            )
             guard let row else { return }
             let confirmed = Comment(id: row.id, username: row.username, text: row.text, date: row.created_at)
             if let memoryIndex = memories.firstIndex(where: { $0.id == memoryID }) {
@@ -894,6 +901,31 @@ final class LaterViewModel {
         }
     }
 
+    // MARK: - Push notifications
+
+    /// The name other users see in push notifications triggered by this user.
+    private var pushSenderName: String {
+        if let name = currentDisplayName, !name.isEmpty { return name }
+        if let username = currentUsername, !username.isEmpty { return "@\(username)" }
+        if let emailName = currentEmail.split(separator: "@").first, !emailName.isEmpty {
+            return String(emailName)
+        }
+        return "Someone"
+    }
+
+    /// Notifies everyone else on a memory (its owner plus everyone it's shared
+    /// with) about new activity, e.g. a comment.
+    private func notifyMemoryParticipants(memoryID: UUID, title: String, body: String) {
+        guard let userID = currentUserID, let memory = memoryByID(memoryID) else { return }
+        var recipients = Set(memory.connections.map { $0.id.uuidString.lowercased() })
+        if let ownerID = ownerByMemoryID[memoryID] {
+            recipients.insert(ownerID.lowercased())
+        }
+        recipients.remove(userID.lowercased())
+        guard !recipients.isEmpty else { return }
+        PushSender.send(to: Array(recipients), title: title, body: body, threadID: memoryID.uuidString)
+    }
+
     // MARK: - Sharing
 
     /// Shares a memory with a friend looked up by `@username` or email. The
@@ -934,6 +966,13 @@ final class LaterViewModel {
 
             let ownerID = ownerByMemoryID[memoryID] ?? userID
             try await CloudMemoryService.shareMemory(memoryID: memoryID, ownerID: ownerID, sharedWith: profile.id)
+            let memoryTitle = memoryByID(memoryID)?.title ?? "a memory"
+            PushSender.send(
+                to: [profile.id],
+                title: "New shared memory",
+                body: "\(pushSenderName) shared \"\(memoryTitle)\" with you",
+                threadID: memoryID.uuidString
+            )
             if isOwnerShare { await pushMemory(memoryID) }
             return .shared(displayName: name)
         } catch {
@@ -1016,6 +1055,11 @@ final class LaterViewModel {
             }
 
             try await ConnectionService.sendRequest(from: userID, to: profile.id)
+            PushSender.send(
+                to: [profile.id],
+                title: "New friend request",
+                body: "\(pushSenderName) sent you a friend request"
+            )
             await loadConnections()
             let name = profile.display_name?.isEmpty == false ? profile.display_name! : profile.username
             return .sent(displayName: name)
@@ -1031,6 +1075,11 @@ final class LaterViewModel {
     func acceptRequest(_ request: FriendRequest) async {
         do {
             try await ConnectionService.accept(id: request.rowID)
+            PushSender.send(
+                to: [request.connection.id.uuidString],
+                title: "Friend request accepted",
+                body: "\(pushSenderName) accepted your friend request"
+            )
             await loadConnections()
         } catch {
             syncError = error.localizedDescription
@@ -1122,6 +1171,12 @@ final class LaterViewModel {
         guard !trimmed.isEmpty else { return nil }
         do {
             guard let row = try await MessageService.send(to: friend.id.uuidString, body: trimmed) else { return nil }
+            PushSender.send(
+                to: [friend.id.uuidString],
+                title: pushSenderName,
+                body: trimmed,
+                threadID: userID
+            )
             return ChatBubble(
                 id: row.id,
                 body: row.body,
