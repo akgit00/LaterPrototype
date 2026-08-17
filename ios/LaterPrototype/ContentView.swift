@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 struct ContentView: View {
     @Environment(AuthManager.self) private var auth
@@ -6,6 +7,13 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var viewModel = LaterViewModel()
     @State private var selectedTab: Int = 0
+
+    /// Notification-tap routing: the pending thread comes from the router and
+    /// resolves to a chat or a memory once data is loaded.
+    @State private var router = NotificationRouter.shared
+    @State private var routedChatFriend: Connection?
+    @State private var routedMemoryID: UUID?
+    @State private var hasCompletedInitialSync = false
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -33,6 +41,9 @@ struct ContentView: View {
             await profile.configure(userID: user.id)
             await PushNotificationService.shared.syncToken(for: user.id)
             await viewModel.sync()
+            // Data is ready — resolve any notification tapped before/at launch.
+            hasCompletedInitialSync = true
+            routePendingNotification()
         }
         // Periodically poll the cloud while the app is active so new comments,
         // friend requests and shared memories appear without a restart. Friend
@@ -51,6 +62,9 @@ struct ContentView: View {
                 } else {
                     await viewModel.loadConnections()
                 }
+                if router.pendingThreadID != nil {
+                    routePendingNotification()
+                }
             }
         }
         // Refresh immediately when the app returns to the foreground.
@@ -59,7 +73,52 @@ struct ContentView: View {
             // Re-check notification permission and retry the token sync in case
             // the user changed settings or a previous attempt failed.
             PushNotificationService.shared.refreshAndResync()
+            // The app shows all current state once open, so the icon badge is
+            // stale by definition.
+            UNUserNotificationCenter.current().setBadgeCount(0)
             Task { await viewModel.refresh() }
+        }
+        // Route notification taps to their source: the chat for a message,
+        // the memory room for shares and comments.
+        .onChange(of: router.pendingThreadID) { _, _ in
+            routePendingNotification()
+        }
+        .sheet(item: $routedChatFriend) { friend in
+            ChatView(viewModel: viewModel, friend: friend)
+        }
+        .fullScreenCover(item: $routedMemoryID) { memoryID in
+            MemoryRoomView(memoryID: memoryID, viewModel: viewModel)
+        }
+    }
+
+    /// Opens the source of a tapped notification once the data backing it has
+    /// loaded: a friend's chat for messages, the memory room for shares and
+    /// comments, or the Profile tab (requests + conversations) as a fallback.
+    private func routePendingNotification() {
+        guard let threadID = router.pendingThreadID else { return }
+
+        if let uuid = UUID(uuidString: threadID) {
+            if let friend = viewModel.allConnections.first(where: { $0.id == uuid }) {
+                router.pendingThreadID = nil
+                routedMemoryID = nil
+                routedChatFriend = friend
+                return
+            }
+            if viewModel.memoryByID(uuid) != nil {
+                router.pendingThreadID = nil
+                routedChatFriend = nil
+                routedMemoryID = uuid
+                return
+            }
+        }
+
+        // Unknown thread (e.g. a friend request from someone not yet in the
+        // friends list): fall back to the Profile tab, where requests and
+        // conversations live — but only once the first sync has finished, so
+        // a cold start still gets a chance to resolve the real target.
+        if hasCompletedInitialSync {
+            router.pendingThreadID = nil
+            selectedTab = 3
         }
     }
 }
