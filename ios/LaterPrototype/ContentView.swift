@@ -56,6 +56,9 @@ struct ContentView: View {
         // Refresh immediately when the app returns to the foreground.
         .onChange(of: scenePhase) { _, newPhase in
             guard newPhase == .active, auth.user != nil else { return }
+            // Re-check notification permission and retry the token sync in case
+            // the user changed settings or a previous attempt failed.
+            PushNotificationService.shared.refreshAndResync()
             Task { await viewModel.refresh() }
         }
     }

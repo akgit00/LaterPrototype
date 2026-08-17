@@ -10,10 +10,28 @@ import UIKit
 final class PushNotificationService {
     static let shared = PushNotificationService()
 
+    /// Where notification setup currently stands. Drives the status card in
+    /// the Profile tab so problems are visible instead of failing silently.
+    enum SetupState: Equatable {
+        case unknown
+        /// iOS hasn't asked the user for permission yet.
+        case needsPermission
+        /// The user declined notifications; only iOS Settings can re-enable.
+        case denied
+        /// Permission granted; waiting for the device token or server sync.
+        case registering
+        /// This device is registered with the server — pushes should arrive.
+        case active
+        /// Something went wrong; the text is safe to show the user.
+        case failed(String)
+    }
+
     /// Whether the user has granted notification permission.
     private(set) var isAuthorized: Bool = false
     /// The hex-encoded APNs device token, available after a successful register.
     private(set) var deviceToken: String?
+    /// Current progress of the permission → token → server-sync pipeline.
+    private(set) var setupState: SetupState = .unknown
 
     private let tokenKey = "apns_device_token"
     private let userIDKey = "apns_token_user_id"
@@ -29,16 +47,31 @@ final class PushNotificationService {
             Task { @MainActor in
                 switch settings.authorizationStatus {
                 case .notDetermined:
+                    self.setupState = .needsPermission
                     self.requestAuthorization()
                 case .authorized, .provisional, .ephemeral:
                     self.isAuthorized = true
+                    if self.setupState != .active {
+                        self.setupState = .registering
+                    }
                     self.registerForRemoteNotifications()
                 case .denied:
                     self.isAuthorized = false
+                    self.setupState = .denied
                 @unknown default:
                     break
                 }
             }
+        }
+    }
+
+    /// Re-checks permission, re-registers, and retries the server sync. Called
+    /// when the app returns to the foreground so changes made in iOS Settings
+    /// (or transient network failures) heal automatically.
+    func refreshAndResync() {
+        requestPermissionIfNeeded()
+        if let userID = UserDefaults.standard.string(forKey: userIDKey) {
+            Task { await syncToken(to: userID) }
         }
     }
 
@@ -49,10 +82,14 @@ final class PushNotificationService {
                     .requestAuthorization(options: [.alert, .badge, .sound])
                 isAuthorized = granted
                 if granted {
+                    setupState = .registering
                     registerForRemoteNotifications()
+                } else {
+                    setupState = .denied
                 }
             } catch {
                 isAuthorized = false
+                setupState = .failed("Could not request permission: \(error.localizedDescription)")
             }
         }
     }
@@ -79,7 +116,9 @@ final class PushNotificationService {
     }
 
     func didFailToRegisterForRemoteNotifications(withError error: Error) {
-        // Non-fatal: the app still works without push; we'll retry on next launch.
+        // Registration fails on simulators and when the build's provisioning
+        // profile lacks the push capability. Surface it instead of hiding it.
+        setupState = .failed("Device registration failed: \(error.localizedDescription)")
     }
 
     // MARK: - Supabase sync
@@ -99,7 +138,14 @@ final class PushNotificationService {
     }
 
     private func syncToken(to userID: String) async {
-        guard let token = deviceToken ?? UserDefaults.standard.string(forKey: tokenKey) else { return }
+        guard let token = deviceToken ?? UserDefaults.standard.string(forKey: tokenKey) else {
+            // No APNs token yet — ask iOS again; the delegate callback re-runs
+            // this sync as soon as the token arrives.
+            if isAuthorized {
+                registerForRemoteNotifications()
+            }
+            return
+        }
         guard SupabaseREST.hasSession else { return }
 
         struct TokenUpsert: Encodable {
@@ -125,9 +171,9 @@ final class PushNotificationService {
                 body: body,
                 prefer: "resolution=merge-duplicates,return=minimal"
             )
+            setupState = .active
         } catch {
-            // Non-fatal: the table might not exist yet, or RLS may block it.
-            // The app still works; we just can't send push notifications yet.
+            setupState = .failed("Could not register this device: \(error.localizedDescription)")
         }
     }
 }

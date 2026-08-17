@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreLocation
+import UIKit
 
 struct ProfileView: View {
     let viewModel: LaterViewModel
@@ -48,6 +49,65 @@ struct ProfileView: View {
         case legacy = "Legacy"
     }
 
+    private var push: PushNotificationService { .shared }
+
+    /// Surfaces notification problems (denied permission, registration or sync
+    /// failures) with a one-tap fix. Hidden when everything works.
+    @ViewBuilder
+    private var notificationStatus: some View {
+        switch push.setupState {
+        case .denied:
+            NotificationStatusCard(
+                icon: "bell.slash.fill",
+                tint: .orange,
+                title: "Notifications are off",
+                message: "You won't know about new messages or friend requests until you turn them on.",
+                buttonTitle: "Open Settings"
+            ) {
+                if let url = URL(string: UIApplication.openNotificationSettingsURLString) {
+                    UIApplication.shared.open(url)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 20)
+        case .needsPermission:
+            NotificationStatusCard(
+                icon: "bell.badge.fill",
+                tint: .blue,
+                title: "Turn on notifications",
+                message: "Get notified about new messages, friend requests and shared memories.",
+                buttonTitle: "Enable Notifications"
+            ) {
+                push.requestPermissionIfNeeded()
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 20)
+        case .failed(let message):
+            NotificationStatusCard(
+                icon: "exclamationmark.triangle.fill",
+                tint: .orange,
+                title: "Notification setup issue",
+                message: message,
+                buttonTitle: "Try Again"
+            ) {
+                push.refreshAndResync()
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 20)
+        case .registering:
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Setting up notifications…")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.bottom, 16)
+        case .active, .unknown:
+            EmptyView()
+        }
+    }
+
     var body: some View {
         @Bindable var bindableViewModel = viewModel
         NavigationStack {
@@ -59,6 +119,8 @@ struct ProfileView: View {
                     statsRow
                         .padding(.horizontal, 16)
                         .padding(.bottom, 20)
+
+                    notificationStatus
 
                     Picker("Section", selection: $selectedSegment) {
                         ForEach(ProfileSegment.allCases, id: \.self) { segment in
@@ -82,6 +144,7 @@ struct ProfileView: View {
             .navigationTitle("Profile")
             .onAppear {
                 capsuleCount = CapsuleStore.load()?.count ?? 0
+                PushNotificationService.shared.requestPermissionIfNeeded()
             }
             .toolbar {
                 if selectedSegment == .connections {
@@ -781,6 +844,44 @@ struct ShareProfileSheet: View {
                 }
             }
         }
+    }
+}
+
+/// Compact banner explaining notification status with a one-tap fix.
+private struct NotificationStatusCard: View {
+    let icon: String
+    let tint: Color
+    let title: String
+    let message: String
+    let buttonTitle: String
+    let action: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 20))
+                    .foregroundStyle(tint)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+            Button(action: action) {
+                Text(buttonTitle)
+                    .font(.footnote.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .tint(tint)
+        }
+        .padding(14)
+        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
     }
 }
 
