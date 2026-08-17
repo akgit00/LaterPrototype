@@ -102,6 +102,16 @@ struct MemoryRoomView: View {
                 await viewModel.refresh()
             }
         }
+        // While this memory is on screen its notifications (comments, shares)
+        // are suppressed as banners and cleared from Notification Center.
+        .onAppear {
+            NotificationCenterDelegate.shared.activeThreadID = memoryID.uuidString.lowercased()
+        }
+        .onDisappear {
+            if NotificationCenterDelegate.shared.activeThreadID == memoryID.uuidString.lowercased() {
+                NotificationCenterDelegate.shared.activeThreadID = nil
+            }
+        }
         .sheet(isPresented: $showMediaSheet) {
             MemoryMediaSheet(
                 memoryID: memoryID,
@@ -1623,22 +1633,17 @@ struct AddPlaylistSheet: View {
         isResolving = true
         errorMessage = nil
         Task {
-            // Full import (name + cover + tracks) when Spotify API access is
-            // available; otherwise fall back to the public oEmbed lookup which
-            // still resolves the playlist's real name and cover art.
-            if SpotifyConfig.isConfigured {
-                do {
-                    if !SpotifyService.shared.isConnected {
-                        try await SpotifyService.shared.connect()
-                    }
-                    let playlist = try await SpotifyService.shared.importPlaylist(fromURL: trimmedURL)
-                    viewModel.setPlaylist(for: memoryID, playlist: playlist)
-                    isResolving = false
-                    dismiss()
-                    return
-                } catch {
-                    // Fall through to the oEmbed lookup below.
-                }
+            // Full import (name + cover + tracks). Uses the Spotify API when
+            // an account is connected and otherwise resolves public playlists
+            // through Spotify's embed page — no sign-in or OAuth needed.
+            do {
+                let playlist = try await SpotifyService.shared.importPlaylist(fromURL: trimmedURL)
+                viewModel.setPlaylist(for: memoryID, playlist: playlist)
+                isResolving = false
+                dismiss()
+                return
+            } catch {
+                // Fall through to the oEmbed lookup below.
             }
 
             do {

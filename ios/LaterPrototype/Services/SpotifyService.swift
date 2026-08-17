@@ -47,6 +47,7 @@ nonisolated private struct SpotifyTracksPage: Codable, Sendable {
         let duration_ms: Int?
         let artists: [Artist]?
         let album: Album?
+        let external_urls: [String: String]?
     }
     nonisolated struct Artist: Codable, Sendable { let name: String }
     nonisolated struct Album: Codable, Sendable { let images: [SpotifyImage]? }
@@ -95,9 +96,28 @@ final class SpotifyService: NSObject {
             case .notConfigured: return "Spotify isn't set up yet. Add your Client ID."
             case .notAuthenticated: return "Connect your Spotify account first."
             case .noCode: return "Spotify didn't return an authorization code."
-            case let .http(status, body): return "Spotify error (\(status)): \(body)"
+            case let .http(status, body):
+                let message = Self.apiMessage(from: body)
+                if status == 403 {
+                    return "Spotify wouldn't share this (403). The playlist may be private or restricted for this app."
+                }
+                return "Spotify error (\(status))\(message.isEmpty ? "" : ": \(message)")"
             case .invalidResponse: return "Unexpected response from Spotify."
             }
+        }
+
+        /// Pulls the human-readable message out of Spotify's JSON error body
+        /// so raw JSON never shows up in the UI.
+        nonisolated private static func apiMessage(from body: String) -> String {
+            guard
+                let data = body.data(using: .utf8),
+                let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let error = root["error"] as? [String: Any],
+                let message = error["message"] as? String
+            else {
+                return ""
+            }
+            return message
         }
     }
 
@@ -325,39 +345,79 @@ final class SpotifyService: NSObject {
     }
 
     /// Resolves a pasted playlist link/URI into a full `PlaylistAttachment`,
-    /// pulling the real name, cover, and tracks from Spotify.
+    /// pulling the real name, cover, and tracks from Spotify. Works without a
+    /// connected account for public playlists via the public embed page.
     func importPlaylist(fromURL urlString: String) async throws -> PlaylistAttachment {
         guard let id = Self.playlistID(from: urlString) else { throw SpotifyError.invalidResponse }
-        let data = try await get("playlists/\(id)", query: [
-            URLQueryItem(name: "fields", value: "id,name,images,external_urls,tracks(total)"),
-        ])
-        let ref = try JSONDecoder().decode(SpotifyPlaylistRef.self, from: data)
-        return try await importPlaylist(ref)
+        if isConnected {
+            do {
+                let data = try await get("playlists/\(id)", query: [
+                    URLQueryItem(name: "fields", value: "id,name,images,external_urls,tracks(total)"),
+                ])
+                let ref = try JSONDecoder().decode(SpotifyPlaylistRef.self, from: data)
+                return try await importPlaylist(ref)
+            } catch {
+                // The API refuses many playlists for development-mode apps
+                // (403); the public embed lookup below still resolves them.
+            }
+        }
+        return try await Self.fetchPublicPlaylist(id: id)
     }
 
     /// Resolves a chosen playlist into a full `PlaylistAttachment` with tracks.
+    ///
+    /// Spotify's API often returns 403 for playlist tracks (development-mode
+    /// apps can't read editorial or other users' playlists), so the public
+    /// embed page is used as a fallback — it also supplies each song's exact
+    /// 30s preview clip, which the API no longer returns.
     func importPlaylist(_ ref: SpotifyPlaylistRef) async throws -> PlaylistAttachment {
-        let data = try await get("playlists/\(ref.id)/tracks", query: [
+        var tracks: [PlaylistTrack] = []
+        var apiError: Error?
+        do {
+            tracks = try await apiPlaylistTracks(playlistID: ref.id)
+        } catch {
+            apiError = error
+        }
+
+        var coverURL = ref.coverURL
+        if tracks.isEmpty {
+            if let publicPlaylist = try? await Self.fetchPublicPlaylist(id: ref.id),
+               !publicPlaylist.tracks.isEmpty {
+                tracks = publicPlaylist.tracks
+                coverURL = coverURL ?? publicPlaylist.coverURL
+            } else if let apiError {
+                throw apiError
+            }
+        } else {
+            tracks = await Self.fillingPreviewURLs(tracks, playlistID: ref.id)
+        }
+
+        return PlaylistAttachment(
+            name: ref.name,
+            source: .spotify,
+            coverURL: coverURL,
+            tracks: tracks,
+            externalURL: ref.externalURL ?? "https://open.spotify.com/playlist/\(ref.id)"
+        )
+    }
+
+    /// Fetches a playlist's tracks through the authorized Web API.
+    private func apiPlaylistTracks(playlistID: String) async throws -> [PlaylistTrack] {
+        let data = try await get("playlists/\(playlistID)/tracks", query: [
             URLQueryItem(name: "limit", value: "50"),
-            URLQueryItem(name: "fields", value: "items(track(name,duration_ms,artists(name),album(images)))"),
+            URLQueryItem(name: "fields", value: "items(track(name,duration_ms,artists(name),album(images),external_urls))"),
         ])
         let page = try JSONDecoder().decode(SpotifyTracksPage.self, from: data)
-        let tracks: [PlaylistTrack] = page.items.compactMap { item in
+        return page.items.compactMap { item in
             guard let track = item.track else { return nil }
             return PlaylistTrack(
                 title: track.name,
                 artist: track.artists?.map { $0.name }.joined(separator: ", ") ?? "",
                 albumArtURL: track.album?.images?.first?.url,
-                duration: Self.formatDuration(track.duration_ms)
+                duration: Self.formatDuration(track.duration_ms),
+                externalURL: track.external_urls?["spotify"]
             )
         }
-        return PlaylistAttachment(
-            name: ref.name,
-            source: .spotify,
-            coverURL: ref.coverURL,
-            tracks: tracks,
-            externalURL: ref.externalURL
-        )
     }
 
     // MARK: - oEmbed (no sign-in required)
@@ -386,13 +446,37 @@ final class SpotifyService: NSObject {
     // MARK: - Public embed lookup (no sign-in required)
 
     /// Fetches a public playlist's tracks from Spotify's embed page, which is
-    /// readable without any account or API credentials. Best effort: returns
-    /// an empty list if Spotify changes the page format.
+    /// readable without any account or API credentials.
     nonisolated static func fetchPublicPlaylistTracks(for urlString: String) async throws -> [PlaylistTrack] {
-        guard
-            let id = playlistID(from: urlString),
-            let url = URL(string: "https://open.spotify.com/embed/playlist/\(id)")
-        else {
+        guard let id = playlistID(from: urlString) else { throw SpotifyError.invalidResponse }
+        return try await fetchPublicPlaylist(id: id).tracks
+    }
+
+    /// Fetches a public playlist's full details — real name, cover art, and
+    /// tracks including their exact 30s preview clips — from Spotify's embed
+    /// page, which needs no account or API credentials.
+    nonisolated static func fetchPublicPlaylist(id: String) async throws -> PlaylistAttachment {
+        let entity = try await fetchEmbedEntity(playlistID: id)
+
+        let name = (entity["title"] as? String) ?? (entity["name"] as? String) ?? "Spotify Playlist"
+        var coverURL: String?
+        if let coverArt = entity["coverArt"] as? [String: Any],
+           let sources = coverArt["sources"] as? [[String: Any]] {
+            coverURL = sources.compactMap { $0["url"] as? String }.first
+        }
+
+        return PlaylistAttachment(
+            name: name,
+            source: .spotify,
+            coverURL: coverURL,
+            tracks: embedTracks(fromEntity: entity),
+            externalURL: "https://open.spotify.com/playlist/\(id)"
+        )
+    }
+
+    /// Downloads the embed page and extracts its `__NEXT_DATA__` entity JSON.
+    nonisolated private static func fetchEmbedEntity(playlistID: String) async throws -> [String: Any] {
+        guard let url = URL(string: "https://open.spotify.com/embed/playlist/\(playlistID)") else {
             throw SpotifyError.invalidResponse
         }
         var request = URLRequest(url: url)
@@ -403,29 +487,27 @@ final class SpotifyService: NSObject {
         let (data, response) = try await URLSession.shared.data(for: request)
         guard
             let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-            let html = String(data: data, encoding: .utf8)
-        else {
-            throw SpotifyError.invalidResponse
-        }
-        return embedTracks(fromHTML: html)
-    }
-
-    /// Pulls the track list out of the embed page's JSON payload.
-    nonisolated private static func embedTracks(fromHTML html: String) -> [PlaylistTrack] {
-        guard
+            let html = String(data: data, encoding: .utf8),
             let start = html.range(of: "<script id=\"__NEXT_DATA__\" type=\"application/json\">"),
             let end = html.range(of: "</script>", range: start.upperBound..<html.endIndex),
             let jsonData = String(html[start.upperBound..<end.lowerBound]).data(using: .utf8),
             let root = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any]
         else {
-            return []
+            throw SpotifyError.invalidResponse
         }
         let props = root["props"] as? [String: Any]
         let pageProps = props?["pageProps"] as? [String: Any]
         let state = pageProps?["state"] as? [String: Any]
         let dataDict = state?["data"] as? [String: Any]
-        let entity = dataDict?["entity"] as? [String: Any]
-        guard let trackList = entity?["trackList"] as? [[String: Any]] else { return [] }
+        guard let entity = dataDict?["entity"] as? [String: Any] else {
+            throw SpotifyError.invalidResponse
+        }
+        return entity
+    }
+
+    /// Pulls the track list (with preview clip URLs) out of the embed entity.
+    nonisolated private static func embedTracks(fromEntity entity: [String: Any]) -> [PlaylistTrack] {
+        guard let trackList = entity["trackList"] as? [[String: Any]] else { return [] }
 
         return trackList.compactMap { item in
             guard let title = item["title"] as? String, !title.isEmpty else { return nil }
@@ -435,8 +517,73 @@ final class SpotifyService: NSObject {
                 let totalSeconds = ms / 1000
                 duration = String(format: "%d:%02d", totalSeconds / 60, totalSeconds % 60)
             }
-            return PlaylistTrack(title: title, artist: artist, duration: duration)
+            let preview = (item["audioPreview"] as? [String: Any])?["url"] as? String
+            var externalURL: String?
+            let uriPrefix = "spotify:track:"
+            if let uri = item["uri"] as? String, uri.hasPrefix(uriPrefix) {
+                externalURL = "https://open.spotify.com/track/\(uri.dropFirst(uriPrefix.count))"
+            }
+            return PlaylistTrack(
+                title: title,
+                artist: artist,
+                duration: duration,
+                previewURL: preview,
+                externalURL: externalURL
+            )
         }
+    }
+
+    /// Copies exact preview clip URLs from the playlist's public embed page
+    /// onto API-imported tracks (the API stopped returning previews), matched
+    /// by normalized title + artist. Best effort: tracks are returned
+    /// unchanged when the embed page can't be read.
+    nonisolated private static func fillingPreviewURLs(_ tracks: [PlaylistTrack], playlistID: String) async -> [PlaylistTrack] {
+        guard tracks.contains(where: { $0.previewURL == nil }) else { return tracks }
+        guard
+            let embedded = try? await fetchPublicPlaylist(id: playlistID).tracks,
+            !embedded.isEmpty
+        else {
+            return tracks
+        }
+
+        var previewByTitleArtist: [String: String] = [:]
+        var previewByTitle: [String: String] = [:]
+        for track in embedded {
+            guard let preview = track.previewURL else { continue }
+            previewByTitleArtist[previewMatchKey(title: track.title, artist: track.artist)] = preview
+            previewByTitle[previewMatchKey(title: track.title, artist: "")] = preview
+        }
+
+        return tracks.map { track in
+            guard track.previewURL == nil else { return track }
+            let preview = previewByTitleArtist[previewMatchKey(title: track.title, artist: track.artist)]
+                ?? previewByTitle[previewMatchKey(title: track.title, artist: "")]
+            guard let preview else { return track }
+            return PlaylistTrack(
+                id: track.id,
+                title: track.title,
+                artist: track.artist,
+                albumArtURL: track.albumArtURL,
+                duration: track.duration,
+                previewURL: preview,
+                externalURL: track.externalURL
+            )
+        }
+    }
+
+    /// Key used to match the same song across the API and embed track lists:
+    /// lowercased, accent-free, alphanumeric title plus the first artist.
+    nonisolated private static func previewMatchKey(title: String, artist: String) -> String {
+        let firstArtist = artist.split(separator: ",").first.map(String.init) ?? artist
+        return normalizedMatchText(title) + "|" + normalizedMatchText(firstArtist)
+    }
+
+    nonisolated private static func normalizedMatchText(_ text: String) -> String {
+        let folded = text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil)
+        let mapped = folded.map { character in
+            character.isLetter || character.isNumber ? character : " "
+        }
+        return String(mapped).split(separator: " ").joined(separator: " ")
     }
 
     // MARK: - Helpers

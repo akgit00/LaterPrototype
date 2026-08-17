@@ -152,7 +152,7 @@ struct SpotifyBrowseView: View {
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
-                Text("\(playlist.trackTotal) tracks")
+                Text(playlist.trackTotal > 0 ? "\(playlist.trackTotal) tracks" : "Playlist")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -193,9 +193,19 @@ struct SpotifyBrowseView: View {
         do {
             playlists = try await SpotifyService.shared.myPlaylists()
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = Self.friendlyMessage(for: error)
         }
         isLoading = false
+    }
+
+    /// Spotify apps in development mode only accept allow-listed accounts, so
+    /// a 403 here usually means the tester isn't registered — say so instead
+    /// of showing a raw error.
+    private static func friendlyMessage(for error: Error) -> String {
+        if case SpotifyService.SpotifyError.http(403, _) = error {
+            return "Spotify blocked this account (403). If this isn't the developer's Spotify account, it must be added under User Management in the Spotify developer dashboard."
+        }
+        return error.localizedDescription
     }
 
     private func runSearch() {

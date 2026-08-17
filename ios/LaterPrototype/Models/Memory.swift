@@ -80,15 +80,20 @@ nonisolated struct PlaylistTrack: Identifiable, Sendable, Codable, Equatable {
     let artist: String
     let albumArtURL: String?
     let duration: String
+    /// Direct URL of this song's short audio clip (e.g. Spotify's 30s preview)
+    /// so playback always matches the listed song. When nil, the player falls
+    /// back to an iTunes lookup by title + artist.
+    let previewURL: String?
     /// External link (e.g. Spotify track URL) used to open the song.
     let externalURL: String?
 
-    init(id: UUID = UUID(), title: String, artist: String, albumArtURL: String? = nil, duration: String = "", externalURL: String? = nil) {
+    init(id: UUID = UUID(), title: String, artist: String, albumArtURL: String? = nil, duration: String = "", previewURL: String? = nil, externalURL: String? = nil) {
         self.id = id
         self.title = title
         self.artist = artist
         self.albumArtURL = albumArtURL
         self.duration = duration
+        self.previewURL = previewURL
         self.externalURL = externalURL
     }
 }
