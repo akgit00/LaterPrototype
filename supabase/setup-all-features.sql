@@ -298,6 +298,13 @@ create table if not exists public.push_tokens (
 alter table public.push_tokens enable row level security;
 grant select, insert, update, delete on public.push_tokens to authenticated;
 
+-- SELECT policy is required: PostgREST upserts use ON CONFLICT DO UPDATE,
+-- which PostgreSQL rejects under RLS unless the existing row is readable.
+drop policy if exists "read own push token" on public.push_tokens;
+create policy "read own push token"
+    on public.push_tokens for select to authenticated
+    using (user_id = auth.uid()::text);
+
 drop policy if exists "upsert own push token" on public.push_tokens;
 create policy "upsert own push token"
     on public.push_tokens for insert to authenticated
