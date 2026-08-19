@@ -636,6 +636,16 @@ final class LaterViewModel {
         Task { await pushMemory(memoryID) }
     }
 
+    /// Owner-only privacy toggle: lets everyone a memory is shared with save
+    /// its photos and videos to their own Photos library.
+    func setMediaSaving(for memoryID: UUID, allowed: Bool) {
+        guard isOwned(memoryID),
+              let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        memories[index].allowsMediaSaving = allowed
+        persist()
+        Task { await pushMemory(memoryID) }
+    }
+
     func deleteMemory(_ id: UUID) {
         guard let index = memories.firstIndex(where: { $0.id == id }) else { return }
         let memory = memories[index]

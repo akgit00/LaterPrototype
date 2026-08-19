@@ -202,6 +202,9 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
     /// When true, the owner allows everyone the memory is shared with to add
     /// more people to it.
     var allowsGuestInvites: Bool
+    /// When true, the owner allows everyone the memory is shared with to save
+    /// its photos and videos to their own Photos library.
+    var allowsMediaSaving: Bool
 
     init(
         id: UUID = UUID(),
@@ -220,7 +223,8 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
         songs: [PlaylistTrack] = [],
         comments: [Comment] = [],
         connections: [Connection] = [],
-        allowsGuestInvites: Bool = false
+        allowsGuestInvites: Bool = false,
+        allowsMediaSaving: Bool = true
     ) {
         self.id = id
         self.title = title
@@ -239,13 +243,14 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
         self.comments = comments
         self.connections = connections
         self.allowsGuestInvites = allowsGuestInvites
+        self.allowsMediaSaving = allowsMediaSaving
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, title, subtitle, date, creators
         case centerLatitude, centerLongitude, spanDelta
         case pins, photoURLs, videos, chatLog, music, playlist, songs, comments, connections
-        case allowsGuestInvites
+        case allowsGuestInvites, allowsMediaSaving
     }
 
     nonisolated static func == (lhs: Memory, rhs: Memory) -> Bool {
@@ -266,6 +271,7 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
             && lhs.comments == rhs.comments
             && lhs.connections == rhs.connections
             && lhs.allowsGuestInvites == rhs.allowsGuestInvites
+            && lhs.allowsMediaSaving == rhs.allowsMediaSaving
     }
 
     nonisolated init(from decoder: Decoder) throws {
@@ -289,6 +295,7 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
         comments = try container.decode([Comment].self, forKey: .comments)
         connections = try container.decode([Connection].self, forKey: .connections)
         allowsGuestInvites = try container.decodeIfPresent(Bool.self, forKey: .allowsGuestInvites) ?? false
+        allowsMediaSaving = try container.decodeIfPresent(Bool.self, forKey: .allowsMediaSaving) ?? true
     }
 
     nonisolated func encode(to encoder: Encoder) throws {
@@ -311,5 +318,6 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
         try container.encode(comments, forKey: .comments)
         try container.encode(connections, forKey: .connections)
         try container.encode(allowsGuestInvites, forKey: .allowsGuestInvites)
+        try container.encode(allowsMediaSaving, forKey: .allowsMediaSaving)
     }
 }

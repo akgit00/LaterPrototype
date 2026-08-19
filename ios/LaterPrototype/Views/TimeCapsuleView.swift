@@ -562,10 +562,10 @@ struct CapsuleDetailSheet: View {
                 }
             }
             .sheet(item: $photoViewer) { selection in
-                PhotoViewerSheet(photoURLs: capsule.photoURLs, initialIndex: selection.index)
+                PhotoViewerSheet(photoURLs: capsule.photoURLs, initialIndex: selection.index, canSave: true)
             }
             .fullScreenCover(item: $playingVideoURL) { url in
-                VideoPlayerView(url: url)
+                VideoPlayerView(url: url, canSave: true)
             }
         }
     }

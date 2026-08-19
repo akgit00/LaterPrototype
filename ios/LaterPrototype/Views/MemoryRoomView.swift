@@ -347,11 +347,19 @@ struct MemoryMediaSheet: View {
     @State private var showAddPlaylistSheet: Bool = false
     @State private var showAddSongSheet: Bool = false
     @State private var showVideoUnavailableAlert: Bool = false
+    @State private var saveResultMessage: String?
 
     private var previewPlayer: PreviewPlayerService { .shared }
 
     private var memory: Memory {
         viewModel.memoryByID(memoryID) ?? Memory(title: "", centerCoordinate: CLLocationCoordinate2D())
+    }
+
+    /// Whether the signed-in user may save this memory's photos and videos to
+    /// their own Photos library: always for the owner, and for guests when
+    /// the owner allows it.
+    private var canSaveMedia: Bool {
+        viewModel.isOwner(of: memoryID) || memory.allowsMediaSaving
     }
 
     enum MediaSection: String, CaseIterable {
@@ -443,7 +451,7 @@ struct MemoryMediaSheet: View {
             Task { await importPickedItems(captured) }
         }
         .sheet(item: $photoViewer) { selection in
-            PhotoViewerSheet(photoURLs: memory.photoURLs, initialIndex: selection.index)
+            PhotoViewerSheet(photoURLs: memory.photoURLs, initialIndex: selection.index, canSave: canSaveMedia)
         }
         .sheet(item: $addressPin) { pin in
             PinAddressSheet(pin: pin)
@@ -453,12 +461,20 @@ struct MemoryMediaSheet: View {
             EditMemorySheet(memoryID: memoryID, viewModel: viewModel)
         }
         .fullScreenCover(item: $playingVideoURL) { url in
-            VideoPlayerView(url: url)
+            VideoPlayerView(url: url, canSave: canSaveMedia)
         }
         .alert("Video not ready", isPresented: $showVideoUnavailableAlert) {
             Button("OK", role: .cancel) {}
         } message: {
             Text("This video is still uploading from the person who added it. Try again in a moment.")
+        }
+        .alert("Save to Photos", isPresented: Binding(
+            get: { saveResultMessage != nil },
+            set: { if !$0 { saveResultMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(saveResultMessage ?? "")
         }
         .onDisappear {
             previewPlayer.stop()
@@ -499,6 +515,30 @@ struct MemoryMediaSheet: View {
             } else {
                 guard let urlString = MediaStore.saveImage(data) else { continue }
                 await viewModel.addPhotoURL(to: memoryID, url: urlString)
+            }
+        }
+    }
+
+    /// Saves one photo to the user's camera roll and reports the outcome.
+    private func saveToPhotos(photoURL: String) {
+        Task {
+            do {
+                try await MediaSaver.savePhoto(urlString: photoURL)
+                saveResultMessage = "Photo saved to your camera roll"
+            } catch {
+                saveResultMessage = error.localizedDescription
+            }
+        }
+    }
+
+    /// Saves one video to the user's camera roll and reports the outcome.
+    private func saveToPhotos(video: VideoAttachment) {
+        Task {
+            do {
+                try await MediaSaver.saveVideo(urlString: video.videoURL)
+                saveResultMessage = "Video saved to your camera roll"
+            } catch {
+                saveResultMessage = error.localizedDescription
             }
         }
     }
@@ -583,6 +623,13 @@ struct MemoryMediaSheet: View {
                             .clipShape(.rect(cornerRadius: 8))
                     }
                     .contextMenu {
+                        if canSaveMedia {
+                            Button {
+                                saveToPhotos(photoURL: url)
+                            } label: {
+                                Label("Save to Photos", systemImage: "square.and.arrow.down")
+                            }
+                        }
                         Button(role: .destructive) {
                             viewModel.removePhotoURL(from: memoryID, url: url)
                         } label: {
@@ -661,6 +708,13 @@ struct MemoryMediaSheet: View {
                                 VideoThumbnailCard(video: video)
                             }
                             .contextMenu {
+                                if canSaveMedia && video.videoURL != nil {
+                                    Button {
+                                        saveToPhotos(video: video)
+                                    } label: {
+                                        Label("Save to Photos", systemImage: "square.and.arrow.down")
+                                    }
+                                }
                                 Button(role: .destructive) {
                                     viewModel.removeVideo(from: memoryID, video: video)
                                 } label: {
@@ -1067,6 +1121,22 @@ struct MemoryMediaSheet: View {
                         Text("Let others add people")
                             .font(.subheadline.weight(.medium))
                         Text("Everyone this memory is shared with can invite more friends")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(12)
+                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+                .padding(.horizontal, 20)
+
+                Toggle(isOn: Binding(
+                    get: { memory.allowsMediaSaving },
+                    set: { viewModel.setMediaSaving(for: memoryID, allowed: $0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Let others save media")
+                            .font(.subheadline.weight(.medium))
+                        Text("Everyone this memory is shared with can save its photos and videos to their camera roll")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -1941,12 +2011,16 @@ struct ChatBubbleView: View {
 struct PhotoViewerSheet: View {
     let photoURLs: [String]
     let initialIndex: Int
+    let canSave: Bool
     @Environment(\.dismiss) private var dismiss
     @State private var currentIndex: Int
+    @State private var saveState: MediaSaveState = .idle
+    @State private var saveErrorMessage: String?
 
-    init(photoURLs: [String], initialIndex: Int) {
+    init(photoURLs: [String], initialIndex: Int, canSave: Bool) {
         self.photoURLs = photoURLs
         self.initialIndex = initialIndex
+        self.canSave = canSave
         _currentIndex = State(initialValue: initialIndex)
     }
 
@@ -1964,6 +2038,28 @@ struct PhotoViewerSheet: View {
             .background(Color.black)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                if canSave {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button {
+                            saveCurrentPhoto()
+                        } label: {
+                            switch saveState {
+                            case .idle:
+                                Image(systemName: "square.and.arrow.down")
+                                    .font(.body.weight(.semibold))
+                                    .foregroundStyle(.white)
+                            case .saving:
+                                ProgressView()
+                                    .tint(.white)
+                            case .saved:
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.title3)
+                                    .foregroundStyle(.green)
+                            }
+                        }
+                        .disabled(saveState != .idle)
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         dismiss()
@@ -1974,6 +2070,34 @@ struct PhotoViewerSheet: View {
                             .foregroundStyle(.white)
                     }
                 }
+            }
+            .onChange(of: currentIndex) { _, _ in
+                saveState = .idle
+            }
+            .alert("Couldn't Save Photo", isPresented: Binding(
+                get: { saveErrorMessage != nil },
+                set: { if !$0 { saveErrorMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(saveErrorMessage ?? "")
+            }
+        }
+    }
+
+    /// Saves the photo currently on screen to the user's camera roll and
+    /// shows a checkmark once it's in.
+    private func saveCurrentPhoto() {
+        guard saveState == .idle, photoURLs.indices.contains(currentIndex) else { return }
+        let urlString = photoURLs[currentIndex]
+        saveState = .saving
+        Task {
+            do {
+                try await MediaSaver.savePhoto(urlString: urlString)
+                saveState = .saved
+            } catch {
+                saveState = .idle
+                saveErrorMessage = error.localizedDescription
             }
         }
     }
@@ -2061,6 +2185,7 @@ struct ZoomableContainer<Content: View>: View {
 
 struct VideoPlayerView: View {
     let url: URL
+    let canSave: Bool
     @Environment(\.dismiss) private var dismiss
     @State private var player: AVPlayer
     @State private var scale: CGFloat = 1
@@ -2068,12 +2193,15 @@ struct VideoPlayerView: View {
     @State private var offset: CGSize = .zero
     @State private var lastOffset: CGSize = .zero
     @State private var isControlsVisible: Bool = true
+    @State private var saveState: MediaSaveState = .idle
+    @State private var saveErrorMessage: String?
 
     private let minScale: CGFloat = 1
     private let maxScale: CGFloat = 5
 
-    init(url: URL) {
+    init(url: URL, canSave: Bool) {
         self.url = url
+        self.canSave = canSave
         _player = State(initialValue: AVPlayer(url: url))
     }
 
@@ -2124,6 +2252,31 @@ struct VideoPlayerView: View {
                             .foregroundStyle(.white)
                     }
 
+                    if canSave {
+                        Button {
+                            saveVideo()
+                        } label: {
+                            Group {
+                                switch saveState {
+                                case .idle:
+                                    Image(systemName: "square.and.arrow.down")
+                                        .font(.title3)
+                                        .foregroundStyle(.white)
+                                case .saving:
+                                    ProgressView()
+                                        .tint(.white)
+                                case .saved:
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.title3)
+                                        .foregroundStyle(.green)
+                                }
+                            }
+                            .padding(10)
+                            .background(.ultraThinMaterial, in: Circle())
+                        }
+                        .disabled(saveState != .idle)
+                    }
+
                     if scale > 1 {
                         Button {
                             withAnimation(.spring(duration: 0.3)) {
@@ -2148,6 +2301,30 @@ struct VideoPlayerView: View {
         }
         .onAppear { player.play() }
         .onDisappear { player.pause() }
+        .alert("Couldn't Save Video", isPresented: Binding(
+            get: { saveErrorMessage != nil },
+            set: { if !$0 { saveErrorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(saveErrorMessage ?? "")
+        }
+    }
+
+    /// Saves this video to the user's camera roll, downloading it first when
+    /// it lives in cloud storage.
+    private func saveVideo() {
+        guard saveState == .idle else { return }
+        saveState = .saving
+        Task {
+            do {
+                try await MediaSaver.saveVideo(urlString: url.absoluteString)
+                saveState = .saved
+            } catch {
+                saveState = .idle
+                saveErrorMessage = error.localizedDescription
+            }
+        }
     }
 
     private var zoomGesture: some Gesture {
