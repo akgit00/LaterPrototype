@@ -19,6 +19,27 @@ nonisolated enum CapsuleStore {
         documents.appendingPathComponent("time_capsules.json")
     }
 
+    /// Per-user file recording capsules the user removed from their list, so
+    /// a cloud sync can't bring them back.
+    private static func hiddenFileURL(userID: String) -> URL {
+        documents.appendingPathComponent("hidden_capsules_\(userID).json")
+    }
+
+    /// Loads the ids of capsules this user has removed from their list.
+    static func loadHiddenIDs(userID: String) -> Set<UUID> {
+        let url = hiddenFileURL(userID: userID)
+        guard FileManager.default.fileExists(atPath: url.path),
+              let data = try? Data(contentsOf: url),
+              let ids = try? JSONDecoder().decode(Set<UUID>.self, from: data) else { return [] }
+        return ids
+    }
+
+    /// Persists the ids of capsules this user has removed from their list.
+    static func saveHiddenIDs(_ ids: Set<UUID>, userID: String) {
+        guard let data = try? JSONEncoder().encode(ids) else { return }
+        try? data.write(to: hiddenFileURL(userID: userID), options: .atomic)
+    }
+
     /// Loads the given user's persisted capsules, or nil if none exist.
     static func load(userID: String) -> [TimeCapsule]? {
         load(from: fileURL(userID: userID))

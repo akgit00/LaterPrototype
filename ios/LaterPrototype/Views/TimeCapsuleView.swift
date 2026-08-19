@@ -11,6 +11,9 @@ struct TimeCapsuleView: View {
     @State private var showCreateSheet: Bool = false
     @State private var openedCapsule: TimeCapsule?
     @State private var isSyncing: Bool = false
+    @State private var capsuleToDelete: TimeCapsule?
+    @State private var lockedCapsule: TimeCapsule?
+    @State private var hiddenIDs: Set<UUID> = []
 
     private var userID: String? { auth.user?.id }
 
@@ -26,18 +29,21 @@ struct TimeCapsuleView: View {
                                 Button {
                                     if capsule.isDelivered {
                                         openedCapsule = capsule
+                                    } else {
+                                        lockedCapsule = capsule
                                     }
                                 } label: {
                                     TimeCapsuleCard(capsule: capsule, currentUserID: userID)
                                 }
                                 .buttonStyle(.plain)
                                 .contextMenu {
-                                    if !capsule.isReceived(by: userID) {
-                                        Button(role: .destructive) {
-                                            deleteCapsule(capsule)
-                                        } label: {
-                                            Label("Delete Capsule", systemImage: "trash")
-                                        }
+                                    Button(role: .destructive) {
+                                        capsuleToDelete = capsule
+                                    } label: {
+                                        Label(
+                                            capsule.isReceived(by: userID) ? "Remove Capsule" : "Delete Capsule",
+                                            systemImage: "trash"
+                                        )
                                     }
                                 }
                             }
@@ -79,9 +85,43 @@ struct TimeCapsuleView: View {
                 .presentationContentInteraction(.scrolls)
             }
             .sheet(item: $openedCapsule) { capsule in
-                CapsuleDetailSheet(capsule: capsule, currentUserID: userID)
-                    .presentationDetents([.medium, .large])
-                    .presentationContentInteraction(.scrolls)
+                CapsuleDetailSheet(capsule: capsule, currentUserID: userID) {
+                    deleteCapsule(capsule)
+                }
+                .presentationDetents([.medium, .large])
+                .presentationContentInteraction(.scrolls)
+            }
+            .confirmationDialog(
+                capsuleToDelete.map { "\($0.isReceived(by: userID) ? "Remove" : "Delete") \"\($0.title)\"?" } ?? "",
+                isPresented: Binding(
+                    get: { capsuleToDelete != nil },
+                    set: { if !$0 { capsuleToDelete = nil } }
+                ),
+                titleVisibility: .visible,
+                presenting: capsuleToDelete
+            ) { capsule in
+                Button(capsule.isReceived(by: userID) ? "Remove Capsule" : "Delete Capsule", role: .destructive) {
+                    deleteCapsule(capsule)
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: { capsule in
+                Text(deleteWarning(for: capsule))
+            }
+            .confirmationDialog(
+                lockedCapsule.map { "\"\($0.title)\" is still sealed" } ?? "",
+                isPresented: Binding(
+                    get: { lockedCapsule != nil },
+                    set: { if !$0 { lockedCapsule = nil } }
+                ),
+                titleVisibility: .visible,
+                presenting: lockedCapsule
+            ) { capsule in
+                Button("Delete Capsule", role: .destructive) {
+                    deleteCapsule(capsule)
+                }
+                Button("Keep Sealed", role: .cancel) {}
+            } message: { capsule in
+                Text("It opens \(capsule.deliveryDate.formatted(date: .abbreviated, time: .omitted)). Deleting it now can't be undone.")
             }
         }
         .task(id: auth.user?.id) {
@@ -112,14 +152,18 @@ struct TimeCapsuleView: View {
     private func loadLocal() {
         guard let userID else {
             capsules = []
+            hiddenIDs = []
             return
         }
+        hiddenIDs = CapsuleStore.loadHiddenIDs(userID: userID)
         var stored = CapsuleStore.load(userID: userID) ?? []
         let adopted = CapsuleStore.migrateLegacyCapsules(to: userID)
         if !adopted.isEmpty {
             stored.append(contentsOf: adopted)
         }
-        capsules = stored.sorted { $0.createdDate > $1.createdDate }
+        capsules = stored
+            .filter { !hiddenIDs.contains($0.id) }
+            .sorted { $0.createdDate > $1.createdDate }
         if !adopted.isEmpty {
             persistLocal()
         }
@@ -141,10 +185,19 @@ struct TimeCapsuleView: View {
         do {
             let rows = try await CapsuleService.fetchCapsules()
             let cloudIDs = Set(rows.map(\.id))
+
+            // Merge in removals made on other devices, and forget hides whose
+            // rows no longer exist (the capsule was fully deleted).
+            if let remoteHides = try? await CapsuleService.fetchHiddenCapsuleIDs() {
+                hiddenIDs.formUnion(remoteHides)
+            }
+            hiddenIDs = Set(hiddenIDs.filter { cloudIDs.contains($0) })
+            CapsuleStore.saveHiddenIDs(hiddenIDs, userID: userID)
+
             let localOnly = capsules.filter {
                 !cloudIDs.contains($0.id) && ($0.senderID == nil || $0.senderID == userID)
             }
-            var merged = rows.map(\.payload) + localOnly
+            var merged = rows.filter { !hiddenIDs.contains($0.id) }.map(\.payload) + localOnly
             merged.sort { $0.createdDate > $1.createdDate }
             capsules = merged
             persistLocal()
@@ -172,15 +225,45 @@ struct TimeCapsuleView: View {
         )
     }
 
+    /// Explains what deleting the given capsule will do, based on the user's role.
+    private func deleteWarning(for capsule: TimeCapsule) -> String {
+        if capsule.isReceived(by: userID) {
+            return "This removes the capsule from your list. \(capsule.senderName ?? "The sender") keeps their copy."
+        }
+        if let recipientID = capsule.recipientID, let senderID = capsule.senderID, recipientID != senderID {
+            return "This permanently deletes the capsule for both you and \(capsule.recipient). This can't be undone."
+        }
+        return "This permanently deletes the capsule. This can't be undone."
+    }
+
+    /// Deletes a capsule the user sealed (removing the cloud row for everyone),
+    /// or removes a received capsule from this user's list without touching
+    /// the sender's copy. The id is remembered so a sync can't resurrect it.
     private func deleteCapsule(_ capsule: TimeCapsule) {
-        capsules.removeAll { $0.id == capsule.id }
+        guard let userID else { return }
+
+        hiddenIDs.insert(capsule.id)
+        CapsuleStore.saveHiddenIDs(hiddenIDs, userID: userID)
+
+        withAnimation(.snappy) {
+            capsules.removeAll { $0.id == capsule.id }
+        }
         persistLocal()
+
         for url in capsule.photoURLs { MediaStore.deleteFile(at: url) }
         for video in capsule.videos {
             if let videoURL = video.videoURL { MediaStore.deleteFile(at: videoURL) }
             MediaStore.deleteFile(at: video.thumbnailURL)
         }
-        Task { try? await CapsuleService.deleteCapsule(id: capsule.id) }
+
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+
+        if capsule.isReceived(by: userID) {
+            // Recipients can't delete the sender's row — record a synced hide.
+            Task { try? await CapsuleService.hideCapsule(id: capsule.id, userID: userID) }
+        } else {
+            Task { try? await CapsuleService.deleteCapsule(id: capsule.id) }
+        }
     }
 }
 
@@ -585,8 +668,10 @@ struct CapsuleDetailSheet: View {
     @Environment(\.dismiss) private var dismiss
     let capsule: TimeCapsule
     let currentUserID: String?
+    var onDelete: (() -> Void)? = nil
     @State private var photoViewer: PhotoViewerSelection?
     @State private var playingVideoURL: URL?
+    @State private var showDeleteConfirm: Bool = false
 
     private var isReceived: Bool {
         capsule.isReceived(by: currentUserID)
@@ -703,9 +788,33 @@ struct CapsuleDetailSheet: View {
             .navigationTitle("Capsule")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                if onDelete != nil {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button(role: .destructive) {
+                            showDeleteConfirm = true
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                    }
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
+            }
+            .confirmationDialog(
+                isReceived ? "Remove this capsule?" : "Delete this capsule?",
+                isPresented: $showDeleteConfirm,
+                titleVisibility: .visible
+            ) {
+                Button(isReceived ? "Remove Capsule" : "Delete Capsule", role: .destructive) {
+                    dismiss()
+                    onDelete?()
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(isReceived
+                    ? "It disappears from your list; \(capsule.senderName ?? "the sender") keeps their copy."
+                    : "This can't be undone.")
             }
             .sheet(item: $photoViewer) { selection in
                 PhotoViewerSheet(photoURLs: capsule.photoURLs, initialIndex: selection.index, canSave: true)

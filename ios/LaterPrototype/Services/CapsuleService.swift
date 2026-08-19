@@ -64,6 +64,39 @@ nonisolated enum CapsuleService {
         )
     }
 
+    private struct HideRow: Codable {
+        let capsule_id: UUID
+    }
+
+    /// Fetches the ids of capsules the user removed from their own list.
+    /// Hides are per-user: they never affect the sender's copy.
+    static func fetchHiddenCapsuleIDs() async throws -> Set<UUID> {
+        let data = try await SupabaseREST.request(
+            path: "capsule_hides",
+            method: "GET",
+            query: [URLQueryItem(name: "select", value: "capsule_id")]
+        )
+        let rows = try SupabaseREST.makeDecoder().decode([HideRow].self, from: data)
+        return Set(rows.map(\.capsule_id))
+    }
+
+    /// Records that the user removed a received capsule from their list, so
+    /// it stays gone across their devices and reinstalls.
+    static func hideCapsule(id: UUID, userID: String) async throws {
+        struct HideUpsert: Encodable {
+            let capsule_id: UUID
+            let user_id: String
+        }
+        let body = try SupabaseREST.makeEncoder().encode(HideUpsert(capsule_id: id, user_id: userID))
+        try await SupabaseREST.request(
+            path: "capsule_hides",
+            method: "POST",
+            query: [URLQueryItem(name: "on_conflict", value: "capsule_id,user_id")],
+            body: body,
+            prefer: "resolution=merge-duplicates,return=minimal"
+        )
+    }
+
     /// Replaces every local file URL inside a capsule with an uploaded public
     /// URL so the recipient's device can load the media. Falls back to the
     /// original URL when an upload fails (retried on the next sync).
