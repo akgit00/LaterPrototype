@@ -14,6 +14,11 @@ final class NotificationRouter {
     /// comments. Cleared once the app navigates.
     var pendingThreadID: String?
 
+    /// Set when a capsule-unlock notification is tapped, so the Capsules tab
+    /// lands on its History segment (where the unlocked capsule now lives).
+    /// Cleared by the tab once it switches.
+    var showCapsuleHistory: Bool = false
+
     private init() {}
 
     func open(threadID: String) {

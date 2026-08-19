@@ -103,6 +103,7 @@ struct ContentView: View {
             router.pendingThreadID = nil
             routedChatFriend = nil
             routedMemoryID = nil
+            router.showCapsuleHistory = true
             selectedTab = 2
             return
         }

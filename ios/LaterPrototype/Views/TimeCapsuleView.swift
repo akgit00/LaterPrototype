@@ -2,6 +2,13 @@ import SwiftUI
 import PhotosUI
 import AVKit
 
+/// The two faces of the Capsules tab: capsules still waiting to unlock, and
+/// the history of everything that has already opened.
+private enum CapsuleSegment: Hashable {
+    case sealed
+    case history
+}
+
 struct TimeCapsuleView: View {
     let viewModel: LaterViewModel
     @Environment(AuthManager.self) private var auth
@@ -14,6 +21,9 @@ struct TimeCapsuleView: View {
     @State private var capsuleToDelete: TimeCapsule?
     @State private var lockedCapsule: TimeCapsule?
     @State private var hiddenIDs: Set<UUID> = []
+    @State private var segment: CapsuleSegment = .sealed
+    @State private var autoPickedSegmentForUserID: String?
+    @State private var router = NotificationRouter.shared
 
     private var userID: String? { auth.user?.id }
 
@@ -23,35 +33,59 @@ struct TimeCapsuleView: View {
                 if capsules.isEmpty {
                     CapsuleEmptyState(onCreate: { showCreateSheet = true })
                 } else {
-                    ScrollView {
-                        LazyVStack(spacing: 16) {
-                            ForEach(capsules) { capsule in
-                                Button {
-                                    if capsule.isDelivered {
-                                        openedCapsule = capsule
-                                    } else {
-                                        lockedCapsule = capsule
-                                    }
-                                } label: {
-                                    TimeCapsuleCard(capsule: capsule, currentUserID: userID)
-                                }
-                                .buttonStyle(.plain)
-                                .contextMenu {
-                                    Button(role: .destructive) {
-                                        capsuleToDelete = capsule
-                                    } label: {
-                                        Label(
-                                            capsule.isReceived(by: userID) ? "Remove Capsule" : "Delete Capsule",
-                                            systemImage: "trash"
-                                        )
-                                    }
-                                }
-                            }
+                    VStack(spacing: 0) {
+                        Picker("View", selection: $segment) {
+                            Text("Sealed (\(sealedCapsules.count))").tag(CapsuleSegment.sealed)
+                            Text("History (\(deliveredCapsules.count))").tag(CapsuleSegment.history)
                         }
+                        .pickerStyle(.segmented)
                         .padding(.horizontal, 16)
-                        .padding(.top, 8)
+                        .padding(.top, 4)
+                        .padding(.bottom, 10)
+
+                        if segment == .sealed && sealedCapsules.isEmpty {
+                            ContentUnavailableView {
+                                Label("Nothing sealed", systemImage: "lock.open")
+                            } description: {
+                                Text("Every capsule has unlocked. Seal a new one for a future day.")
+                            } actions: {
+                                Button("New Capsule") { showCreateSheet = true }
+                            }
+                        } else if segment == .history && deliveredCapsules.isEmpty {
+                            ContentUnavailableView {
+                                Label("No history yet", systemImage: "envelope.open")
+                            } description: {
+                                Text("When a capsule reaches its delivery date, it unlocks and lands here.")
+                            }
+                        } else {
+                            ScrollView {
+                                LazyVStack(spacing: 16) {
+                                    if segment == .sealed {
+                                        ForEach(sealedCapsules) { capsule in
+                                            capsuleRow(capsule)
+                                        }
+                                    } else {
+                                        ForEach(historyGroups, id: \.month) { group in
+                                            VStack(alignment: .leading, spacing: 12) {
+                                                Text(group.month.formatted(.dateTime.month(.wide).year()))
+                                                    .font(.caption.weight(.bold))
+                                                    .foregroundStyle(.secondary)
+                                                    .textCase(.uppercase)
+                                                    .padding(.leading, 4)
+
+                                                ForEach(group.capsules) { capsule in
+                                                    capsuleRow(capsule)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                .padding(.horizontal, 16)
+                                .padding(.top, 8)
+                            }
+                            .refreshable { await sync() }
+                        }
                     }
-                    .refreshable { await sync() }
                 }
             }
             .navigationTitle("Time Capsules")
@@ -78,6 +112,7 @@ struct TimeCapsuleView: View {
                     currentUserName: senderDisplayName
                 ) { newCapsule in
                     capsules.insert(newCapsule, at: 0)
+                    segment = newCapsule.isDelivered ? .history : .sealed
                     persistLocal()
                     Task { await pushCapsule(newCapsule) }
                 }
@@ -126,6 +161,7 @@ struct TimeCapsuleView: View {
         }
         .task(id: auth.user?.id) {
             loadLocal()
+            consumeHistoryRequest()
             await sync()
         }
         // Re-check the cloud whenever the tab is opened or the app returns to
@@ -138,6 +174,66 @@ struct TimeCapsuleView: View {
             guard phase == .active else { return }
             Task { await sync() }
         }
+        // A tapped capsule-unlock notification requests the History segment,
+        // where the freshly unlocked capsule now lives.
+        .onChange(of: router.showCapsuleHistory) { _, requested in
+            guard requested else { return }
+            consumeHistoryRequest()
+        }
+    }
+
+    /// Capsules still locked, ordered so the next one to open is on top.
+    private var sealedCapsules: [TimeCapsule] {
+        capsules.filter { !$0.isDelivered }.sorted { $0.deliveryDate < $1.deliveryDate }
+    }
+
+    /// Capsules whose delivery date has passed.
+    private var deliveredCapsules: [TimeCapsule] {
+        capsules.filter(\.isDelivered)
+    }
+
+    /// History timeline: unlocked capsules grouped by the month they opened,
+    /// most recent month (and capsule) first.
+    private var historyGroups: [(month: Date, capsules: [TimeCapsule])] {
+        let calendar = Calendar.current
+        let grouped = Dictionary(grouping: deliveredCapsules) { capsule in
+            calendar.dateInterval(of: .month, for: capsule.deliveryDate)?.start ?? capsule.deliveryDate
+        }
+        return grouped
+            .map { (month: $0.key, capsules: $0.value.sorted { $0.deliveryDate > $1.deliveryDate }) }
+            .sorted { $0.month > $1.month }
+    }
+
+    /// A tappable capsule card with its delete context menu, shared by both segments.
+    private func capsuleRow(_ capsule: TimeCapsule) -> some View {
+        Button {
+            if capsule.isDelivered {
+                openedCapsule = capsule
+            } else {
+                lockedCapsule = capsule
+            }
+        } label: {
+            TimeCapsuleCard(capsule: capsule, currentUserID: userID)
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button(role: .destructive) {
+                capsuleToDelete = capsule
+            } label: {
+                Label(
+                    capsule.isReceived(by: userID) ? "Remove Capsule" : "Delete Capsule",
+                    systemImage: "trash"
+                )
+            }
+        }
+    }
+
+    /// Jumps to the History segment when a capsule-unlock notification was
+    /// tapped, so the freshly unlocked capsule is immediately visible.
+    private func consumeHistoryRequest() {
+        guard router.showCapsuleHistory else { return }
+        router.showCapsuleHistory = false
+        segment = .history
     }
 
     /// The name attached to sealed capsules so recipients know who they're from.
@@ -153,6 +249,8 @@ struct TimeCapsuleView: View {
         guard let userID else {
             capsules = []
             hiddenIDs = []
+            segment = .sealed
+            autoPickedSegmentForUserID = nil
             return
         }
         hiddenIDs = CapsuleStore.loadHiddenIDs(userID: userID)
@@ -164,6 +262,12 @@ struct TimeCapsuleView: View {
         capsules = stored
             .filter { !hiddenIDs.contains($0.id) }
             .sorted { $0.createdDate > $1.createdDate }
+        // First look for this account: land on History when everything has
+        // already unlocked, otherwise show what's still sealed.
+        if autoPickedSegmentForUserID != userID {
+            autoPickedSegmentForUserID = userID
+            segment = capsules.isEmpty || capsules.contains { !$0.isDelivered } ? .sealed : .history
+        }
         if !adopted.isEmpty {
             persistLocal()
         }
@@ -379,18 +483,22 @@ struct TimeCapsuleCard: View {
                     .tint(progress >= 1.0 ? .green : .blue)
 
                 HStack {
-                    Text("Opens \(capsule.deliveryDate, style: .date)")
+                    Text("\(capsule.isDelivered ? "Opened" : "Opens") \(capsule.deliveryDate, style: .date)")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    if daysUntilDelivery > 0 {
+                    if capsule.isDelivered {
+                        Text("Unlocked")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.green)
+                    } else if daysUntilDelivery > 0 {
                         Text("\(daysUntilDelivery) days left")
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(.blue)
                     } else {
-                        Text("Ready to open")
+                        Text("Opens today")
                             .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.green)
+                            .foregroundStyle(.blue)
                     }
                 }
             }
