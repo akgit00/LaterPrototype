@@ -2,7 +2,9 @@
 //
 // Sends APNs alert notifications to the device tokens of the given app users.
 // Called by the iOS app after user actions (new message, friend request,
-// shared memory, new comment). The caller must be a signed-in app user.
+// shared memory, new comment) and by the database's capsule-unlock cron job.
+// The caller must be a signed-in app user, or the cron job authenticating
+// with the service role key.
 //
 // Required function secrets (Dashboard -> Edge Functions -> send-push -> Secrets):
 //   APNS_AUTH_KEY  - full contents of the .p8 APNs auth key from Apple
@@ -163,15 +165,21 @@ Deno.serve(async (req) => {
     );
   }
 
-  // Only signed-in app users may trigger pushes.
+  // Only signed-in app users may trigger pushes — plus the database itself
+  // (the capsule-unlock cron), which authenticates with the service role key.
   const authHeader = req.headers.get("authorization") ?? "";
-  const userRes = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
-    headers: { apikey: ANON_KEY, authorization: authHeader },
-  });
-  if (!userRes.ok) {
-    return Response.json({ error: "not authenticated" }, { status: 401 });
+  const bearer = authHeader.replace(/^Bearer\s+/i, "").trim();
+  let callerID: string | null = null;
+  if (!SERVICE_ROLE_KEY || bearer !== SERVICE_ROLE_KEY) {
+    const userRes = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+      headers: { apikey: ANON_KEY, authorization: authHeader },
+    });
+    if (!userRes.ok) {
+      return Response.json({ error: "not authenticated" }, { status: 401 });
+    }
+    const caller: { id: string } = await userRes.json();
+    callerID = caller.id;
   }
-  const caller: { id: string } = await userRes.json();
 
   let body: PushRequest;
   try {
@@ -180,12 +188,14 @@ Deno.serve(async (req) => {
     return Response.json({ error: "invalid JSON" }, { status: 400 });
   }
 
-  // Normalize, dedupe, drop the caller themselves, and cap the fan-out.
+  // Normalize, dedupe, drop the caller themselves (system callers have no
+  // user id, so self-addressed capsule pushes still go through), and cap the
+  // fan-out.
   const recipients = [
     ...new Set(
       (body.recipients ?? [])
         .map((r) => String(r).toLowerCase().trim())
-        .filter((r) => UUID_RE.test(r) && r !== caller.id),
+        .filter((r) => UUID_RE.test(r) && r !== callerID),
     ),
   ].slice(0, 100);
   const title = String(body.title ?? "").slice(0, 120);
