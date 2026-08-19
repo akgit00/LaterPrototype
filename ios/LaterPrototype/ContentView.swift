@@ -26,7 +26,7 @@ struct ContentView: View {
             }
 
             Tab("Capsules", systemImage: "envelope.badge.shield.half.filled", value: 2) {
-                TimeCapsuleView()
+                TimeCapsuleView(viewModel: viewModel)
             }
 
             Tab("Profile", systemImage: "person.crop.circle", value: 3) {
@@ -96,6 +96,16 @@ struct ContentView: View {
     /// comments, or the Profile tab (requests + conversations) as a fallback.
     private func routePendingNotification() {
         guard let threadID = router.pendingThreadID else { return }
+
+        // Capsule-unlock pushes carry the "capsules" thread and route straight
+        // to the Capsules tab, which refreshes itself on appear.
+        if threadID == "capsules" {
+            router.pendingThreadID = nil
+            routedChatFriend = nil
+            routedMemoryID = nil
+            selectedTab = 2
+            return
+        }
 
         if let uuid = UUID(uuidString: threadID) {
             if let friend = viewModel.allConnections.first(where: { $0.id == uuid }) {

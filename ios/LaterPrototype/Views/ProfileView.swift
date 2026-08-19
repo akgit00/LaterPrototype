@@ -143,7 +143,11 @@ struct ProfileView: View {
             }
             .navigationTitle("Profile")
             .onAppear {
-                capsuleCount = CapsuleStore.load()?.count ?? 0
+                if let userID = auth.user?.id {
+                    capsuleCount = CapsuleStore.load(userID: userID)?.count ?? 0
+                } else {
+                    capsuleCount = 0
+                }
                 PushNotificationService.shared.requestPermissionIfNeeded()
             }
             .toolbar {

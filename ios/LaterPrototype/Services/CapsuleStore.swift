@@ -1,35 +1,62 @@
 import Foundation
 
-/// Persists the user's time capsules as JSON in the app's Documents directory.
-/// All work is `nonisolated` so encoding/decoding stays off the main actor.
+/// Persists time capsules as JSON in the app's Documents directory, scoped
+/// per user id so different accounts on the same device never see each
+/// other's capsules. All work is `nonisolated` so encoding/decoding stays off
+/// the main actor.
 nonisolated enum CapsuleStore {
-    private static var fileURL: URL {
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return documents.appendingPathComponent("time_capsules.json")
+    private static var documents: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
 
-    /// Loads persisted capsules from disk, or nil if none exist or decoding fails.
-    static func load() -> [TimeCapsule]? {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
+    /// Per-user capsule cache. User ids are UUIDs, so they're path-safe.
+    private static func fileURL(userID: String) -> URL {
+        documents.appendingPathComponent("time_capsules_\(userID).json")
+    }
+
+    /// The old shared file that every account on this device could read.
+    private static var legacyFileURL: URL {
+        documents.appendingPathComponent("time_capsules.json")
+    }
+
+    /// Loads the given user's persisted capsules, or nil if none exist.
+    static func load(userID: String) -> [TimeCapsule]? {
+        load(from: fileURL(userID: userID))
+    }
+
+    /// Persists the given user's capsules to their own file.
+    static func save(_ capsules: [TimeCapsule], userID: String) {
         do {
-            let data = try Data(contentsOf: fileURL)
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            let data = try encoder.encode(capsules)
+            try data.write(to: fileURL(userID: userID), options: .atomic)
+        } catch {
+            // Persistence is best-effort; failures are non-fatal.
+        }
+    }
+
+    /// One-time migration: adopts capsules from the legacy shared file into
+    /// the given user's store, then deletes the shared file so other accounts
+    /// on this device can no longer see them. Returns the adopted capsules.
+    static func migrateLegacyCapsules(to userID: String) -> [TimeCapsule] {
+        guard let legacy = load(from: legacyFileURL), !legacy.isEmpty else {
+            try? FileManager.default.removeItem(at: legacyFileURL)
+            return []
+        }
+        try? FileManager.default.removeItem(at: legacyFileURL)
+        return legacy.map { $0.adopted(by: userID) }
+    }
+
+    private static func load(from url: URL) -> [TimeCapsule]? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        do {
+            let data = try Data(contentsOf: url)
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             return try decoder.decode([TimeCapsule].self, from: data)
         } catch {
             return nil
-        }
-    }
-
-    /// Persists the given capsules to disk.
-    static func save(_ capsules: [TimeCapsule]) {
-        do {
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            let data = try encoder.encode(capsules)
-            try data.write(to: fileURL, options: .atomic)
-        } catch {
-            // Persistence is best-effort; failures are non-fatal.
         }
     }
 }

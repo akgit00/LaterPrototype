@@ -3,9 +3,16 @@ import PhotosUI
 import AVKit
 
 struct TimeCapsuleView: View {
+    let viewModel: LaterViewModel
+    @Environment(AuthManager.self) private var auth
+    @Environment(\.scenePhase) private var scenePhase
+
     @State private var capsules: [TimeCapsule] = []
     @State private var showCreateSheet: Bool = false
     @State private var openedCapsule: TimeCapsule?
+    @State private var isSyncing: Bool = false
+
+    private var userID: String? { auth.user?.id }
 
     var body: some View {
         NavigationStack {
@@ -21,18 +28,34 @@ struct TimeCapsuleView: View {
                                         openedCapsule = capsule
                                     }
                                 } label: {
-                                    TimeCapsuleCard(capsule: capsule)
+                                    TimeCapsuleCard(capsule: capsule, currentUserID: userID)
                                 }
                                 .buttonStyle(.plain)
+                                .contextMenu {
+                                    if !capsule.isReceived(by: userID) {
+                                        Button(role: .destructive) {
+                                            deleteCapsule(capsule)
+                                        } label: {
+                                            Label("Delete Capsule", systemImage: "trash")
+                                        }
+                                    }
+                                }
                             }
                         }
                         .padding(.horizontal, 16)
                         .padding(.top, 8)
                     }
+                    .refreshable { await sync() }
                 }
             }
             .navigationTitle("Time Capsules")
             .toolbar {
+                if isSyncing {
+                    ToolbarItem(placement: .topBarLeading) {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         showCreateSheet = true
@@ -43,22 +66,121 @@ struct TimeCapsuleView: View {
                 }
             }
             .sheet(isPresented: $showCreateSheet) {
-                CreateCapsuleSheet { newCapsule in
+                CreateCapsuleSheet(
+                    friends: viewModel.allConnections,
+                    currentUserID: userID,
+                    currentUserName: senderDisplayName
+                ) { newCapsule in
                     capsules.insert(newCapsule, at: 0)
-                    CapsuleStore.save(capsules)
+                    persistLocal()
+                    Task { await pushCapsule(newCapsule) }
                 }
                 .presentationDetents([.medium, .large])
+                .presentationContentInteraction(.scrolls)
             }
             .sheet(item: $openedCapsule) { capsule in
-                CapsuleDetailSheet(capsule: capsule)
+                CapsuleDetailSheet(capsule: capsule, currentUserID: userID)
                     .presentationDetents([.medium, .large])
+                    .presentationContentInteraction(.scrolls)
             }
         }
+        .task(id: auth.user?.id) {
+            loadLocal()
+            await sync()
+        }
+        // Re-check the cloud whenever the tab is opened or the app returns to
+        // the foreground, so capsules that unlocked in the meantime (and were
+        // announced by a push) appear immediately.
         .onAppear {
-            if let stored = CapsuleStore.load() {
-                capsules = stored
-            }
+            Task { await sync() }
         }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { await sync() }
+        }
+    }
+
+    /// The name attached to sealed capsules so recipients know who they're from.
+    private var senderDisplayName: String? {
+        if let name = auth.user?.name, !name.isEmpty { return name }
+        if let username = viewModel.currentUsername, !username.isEmpty { return "@\(username)" }
+        return nil
+    }
+
+    /// Loads this user's cached capsules, adopting any from the legacy shared
+    /// file (which is then deleted so other accounts can't see them).
+    private func loadLocal() {
+        guard let userID else {
+            capsules = []
+            return
+        }
+        var stored = CapsuleStore.load(userID: userID) ?? []
+        let adopted = CapsuleStore.migrateLegacyCapsules(to: userID)
+        if !adopted.isEmpty {
+            stored.append(contentsOf: adopted)
+        }
+        capsules = stored.sorted { $0.createdDate > $1.createdDate }
+        if !adopted.isEmpty {
+            persistLocal()
+        }
+    }
+
+    private func persistLocal() {
+        guard let userID else { return }
+        CapsuleStore.save(capsules, userID: userID)
+    }
+
+    /// Pulls capsules from the cloud (sealed by me + delivered to me), keeps
+    /// any not-yet-uploaded local ones, and re-pushes those so they survive
+    /// reinstalls and reach their recipients.
+    private func sync() async {
+        guard let userID, SupabaseREST.hasSession, !isSyncing else { return }
+        isSyncing = true
+        defer { isSyncing = false }
+
+        do {
+            let rows = try await CapsuleService.fetchCapsules()
+            let cloudIDs = Set(rows.map(\.id))
+            let localOnly = capsules.filter {
+                !cloudIDs.contains($0.id) && ($0.senderID == nil || $0.senderID == userID)
+            }
+            var merged = rows.map(\.payload) + localOnly
+            merged.sort { $0.createdDate > $1.createdDate }
+            capsules = merged
+            persistLocal()
+
+            for capsule in localOnly {
+                await pushCapsule(capsule)
+            }
+        } catch {
+            // Offline is fine — the local cache still shows.
+        }
+    }
+
+    /// Uploads a capsule's local media, then upserts the capsule row.
+    private func pushCapsule(_ capsule: TimeCapsule) async {
+        guard let userID, SupabaseREST.hasSession else { return }
+        let uploaded = await CapsuleService.uploadingLocalMedia(in: capsule, userID: userID)
+        if let index = capsules.firstIndex(where: { $0.id == uploaded.id }) {
+            capsules[index] = uploaded
+            persistLocal()
+        }
+        try? await CapsuleService.upsertCapsule(
+            uploaded,
+            senderID: uploaded.senderID ?? userID,
+            recipientID: uploaded.recipientID ?? userID
+        )
+    }
+
+    private func deleteCapsule(_ capsule: TimeCapsule) {
+        capsules.removeAll { $0.id == capsule.id }
+        persistLocal()
+        for url in capsule.photoURLs { MediaStore.deleteFile(at: url) }
+        for video in capsule.videos {
+            if let videoURL = video.videoURL { MediaStore.deleteFile(at: videoURL) }
+            MediaStore.deleteFile(at: video.thumbnailURL)
+        }
+        Task { try? await CapsuleService.deleteCapsule(id: capsule.id) }
     }
 }
 
@@ -111,73 +233,13 @@ struct CapsuleEmptyState: View {
     }
 }
 
-nonisolated struct TimeCapsule: Identifiable, Sendable, Codable {
-    let id: UUID
-    let title: String
-    let message: String
-    let recipient: String
-    let deliveryDate: Date
-    let createdDate: Date
-    /// Sealed-in photos (local file URLs).
-    let photoURLs: [String]
-    /// Sealed-in videos.
-    let videos: [VideoAttachment]
-    /// An optional song / playlist link sealed with the capsule.
-    let songLink: String?
-
-    /// A capsule is delivered once its delivery date has arrived.
-    var isDelivered: Bool {
-        deliveryDate <= Date()
-    }
-
-    /// Number of attachments sealed inside (shown while locked).
-    var attachmentCount: Int {
-        photoURLs.count + videos.count + (songLink == nil ? 0 : 1)
-    }
-
-    init(
-        id: UUID = UUID(),
-        title: String,
-        message: String,
-        recipient: String,
-        deliveryDate: Date,
-        createdDate: Date,
-        photoURLs: [String] = [],
-        videos: [VideoAttachment] = [],
-        songLink: String? = nil
-    ) {
-        self.id = id
-        self.title = title
-        self.message = message
-        self.recipient = recipient
-        self.deliveryDate = deliveryDate
-        self.createdDate = createdDate
-        self.photoURLs = photoURLs
-        self.videos = videos
-        self.songLink = songLink
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case id, title, message, recipient, deliveryDate, createdDate
-        case photoURLs, videos, songLink
-    }
-
-    nonisolated init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = try container.decode(UUID.self, forKey: .id)
-        title = try container.decode(String.self, forKey: .title)
-        message = try container.decode(String.self, forKey: .message)
-        recipient = try container.decode(String.self, forKey: .recipient)
-        deliveryDate = try container.decode(Date.self, forKey: .deliveryDate)
-        createdDate = try container.decode(Date.self, forKey: .createdDate)
-        photoURLs = try container.decodeIfPresent([String].self, forKey: .photoURLs) ?? []
-        videos = try container.decodeIfPresent([VideoAttachment].self, forKey: .videos) ?? []
-        songLink = try container.decodeIfPresent(String.self, forKey: .songLink)
-    }
-}
-
 struct TimeCapsuleCard: View {
     let capsule: TimeCapsule
+    let currentUserID: String?
+
+    private var isReceived: Bool {
+        capsule.isReceived(by: currentUserID)
+    }
 
     private var daysUntilDelivery: Int {
         Calendar.current.dateComponents([.day], from: Date(), to: capsule.deliveryDate).day ?? 0
@@ -198,12 +260,12 @@ struct TimeCapsuleCard: View {
                         .font(.headline)
 
                     HStack(spacing: 4) {
-                        Image(systemName: "person.fill")
+                        Image(systemName: isReceived ? "gift.fill" : "person.fill")
                             .font(.caption2)
-                        Text("To: \(capsule.recipient)")
+                        Text(isReceived ? "From: \(capsule.senderName ?? "A friend")" : "To: \(capsule.recipient)")
                             .font(.caption)
                     }
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isReceived ? AnyShapeStyle(.blue) : AnyShapeStyle(.secondary))
                 }
 
                 Spacer()
@@ -257,10 +319,15 @@ struct TimeCapsuleCard: View {
 
 struct CreateCapsuleSheet: View {
     @Environment(\.dismiss) private var dismiss
+    let friends: [Connection]
+    let currentUserID: String?
+    let currentUserName: String?
     let onSeal: (TimeCapsule) -> Void
+
     @State private var title: String = ""
     @State private var message: String = ""
-    @State private var recipient: String = ""
+    @State private var selectedFriend: Connection?
+    @State private var friendSearch: String = ""
     @State private var deliveryDate: Date = Calendar.current.date(byAdding: .month, value: 1, to: Date())!
     @State private var songLink: String = ""
     @State private var photoURLs: [String] = []
@@ -268,15 +335,27 @@ struct CreateCapsuleSheet: View {
     @State private var pickerItems: [PhotosPickerItem] = []
     @State private var isImporting: Bool = false
 
+    /// Friends filtered by the search text (all friends when it's empty).
+    private var filteredFriends: [Connection] {
+        let query = friendSearch.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !query.isEmpty else { return friends }
+        return friends.filter {
+            $0.displayName.lowercased().contains(query)
+                || $0.username.lowercased().contains(query)
+        }
+    }
+
     private func seal() {
-        let trimmedRecipient = recipient.trimmingCharacters(in: .whitespaces)
         let trimmedLink = songLink.trimmingCharacters(in: .whitespacesAndNewlines)
         let capsule = TimeCapsule(
             title: title.trimmingCharacters(in: .whitespaces),
             message: message,
-            recipient: trimmedRecipient.isEmpty ? "Future me" : trimmedRecipient,
+            recipient: selectedFriend?.displayName ?? "Future me",
             deliveryDate: deliveryDate,
             createdDate: Date(),
+            senderID: currentUserID,
+            senderName: currentUserName,
+            recipientID: selectedFriend?.id.uuidString.lowercased() ?? currentUserID,
             photoURLs: photoURLs,
             videos: videos,
             songLink: trimmedLink.isEmpty ? nil : trimmedLink
@@ -290,8 +369,70 @@ struct CreateCapsuleSheet: View {
             Form {
                 Section("Capsule Details") {
                     TextField("Title", text: $title)
-                    TextField("Recipient", text: $recipient)
                     DatePicker("Delivery Date", selection: $deliveryDate, in: Date()..., displayedComponents: .date)
+                }
+
+                Section {
+                    Button {
+                        selectedFriend = nil
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "person.crop.circle.badge.clock.fill")
+                                .font(.title3)
+                                .foregroundStyle(.blue)
+                                .frame(width: 32)
+                            Text("Future me")
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            if selectedFriend == nil {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.blue)
+                            }
+                        }
+                    }
+
+                    if !friends.isEmpty {
+                        TextField("Search friends", text: $friendSearch)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+
+                        ForEach(filteredFriends) { friend in
+                            Button {
+                                selectedFriend = friend
+                            } label: {
+                                HStack(spacing: 10) {
+                                    ConnectionAvatarView(connection: friend, size: 32)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(friend.displayName)
+                                            .font(.subheadline)
+                                            .foregroundStyle(.primary)
+                                        Text("@\(friend.username)")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    if selectedFriend?.id == friend.id {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundStyle(.blue)
+                                    }
+                                }
+                            }
+                        }
+
+                        if filteredFriends.isEmpty {
+                            Text("No friends match \"\(friendSearch)\"")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } header: {
+                    Text("Deliver To")
+                } footer: {
+                    if friends.isEmpty {
+                        Text("To send a capsule to a friend, add them from the Search tab first.")
+                    } else {
+                        Text("Capsules sent to a friend stay completely invisible to them until the delivery date.")
+                    }
                 }
 
                 Section("Message") {
@@ -443,21 +584,26 @@ struct CreateCapsuleSheet: View {
 struct CapsuleDetailSheet: View {
     @Environment(\.dismiss) private var dismiss
     let capsule: TimeCapsule
+    let currentUserID: String?
     @State private var photoViewer: PhotoViewerSelection?
     @State private var playingVideoURL: URL?
+
+    private var isReceived: Bool {
+        capsule.isReceived(by: currentUserID)
+    }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     HStack(spacing: 10) {
-                        Image(systemName: "envelope.open.fill")
+                        Image(systemName: isReceived ? "gift.fill" : "envelope.open.fill")
                             .font(.title2)
-                            .foregroundStyle(.green)
+                            .foregroundStyle(isReceived ? .blue : .green)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(capsule.title)
                                 .font(.title3.weight(.bold))
-                            Text("To: \(capsule.recipient)")
+                            Text(isReceived ? "From: \(capsule.senderName ?? "A friend")" : "To: \(capsule.recipient)")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                         }
