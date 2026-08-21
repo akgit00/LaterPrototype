@@ -37,6 +37,10 @@ struct MemoryRoomView: View {
     @State private var webRevealProgress: [UUID: Double] = [:]
     /// Whether the hub card has popped in yet (first step of the expansion).
     @State private var hubRevealed: Bool = false
+    /// Pinned memory being edited straight from its map pin (long-press).
+    @State private var mapSubMemoryToEdit: SubMemory?
+    /// Pinned memory pending removal straight from its map pin (long-press).
+    @State private var mapSubMemoryToDelete: SubMemory?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var previewPlayer: PreviewPlayerService { .shared }
@@ -143,6 +147,20 @@ struct MemoryRoomView: View {
                                 .animation(.spring(duration: 0.5, bounce: 0.55), value: isPinRevealed(sub))
                             }
                             .buttonStyle(.plain)
+                            .contextMenu {
+                                if viewModel.isOwner(of: memoryID) {
+                                    Button {
+                                        mapSubMemoryToEdit = sub
+                                    } label: {
+                                        Label("Edit", systemImage: "pencil")
+                                    }
+                                    Button(role: .destructive) {
+                                        mapSubMemoryToDelete = sub
+                                    } label: {
+                                        Label("Remove Pin", systemImage: "trash")
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -165,6 +183,29 @@ struct MemoryRoomView: View {
             }
             .mapStyle(.imagery(elevation: .realistic))
             .ignoresSafeArea()
+            .sheet(item: $mapSubMemoryToEdit) { sub in
+                SubMemoryEditorSheet(memoryID: memoryID, viewModel: viewModel, existing: sub)
+            }
+            .confirmationDialog(
+                "Remove \"\(mapSubMemoryToDelete?.title ?? "")\"?",
+                isPresented: Binding(
+                    get: { mapSubMemoryToDelete != nil },
+                    set: { if !$0 { mapSubMemoryToDelete = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Remove Pin", role: .destructive) {
+                    if let sub = mapSubMemoryToDelete {
+                        if selectedSubMemoryID == sub.id { selectedSubMemoryID = nil }
+                        webRevealProgress[sub.id] = nil
+                        viewModel.deleteSubMemory(memoryID: memoryID, subMemoryID: sub.id)
+                    }
+                    mapSubMemoryToDelete = nil
+                }
+                Button("Cancel", role: .cancel) { mapSubMemoryToDelete = nil }
+            } message: {
+                Text("Its photos and videos stay in the main memory — only the pin comes off the map.")
+            }
 
             headerOverlay
         }
@@ -1090,59 +1131,87 @@ struct MemoryMediaSheet: View {
     }
 
     private func subMemoryRow(_ sub: SubMemory) -> some View {
-        Button {
-            selectedSubMemoryID = selectedSubMemoryID == sub.id ? nil : sub.id
-            selectedSection = .photos
-        } label: {
-            HStack(spacing: 12) {
-                Color(.secondarySystemBackground)
-                    .frame(width: 56, height: 56)
-                    .overlay {
-                        if let cover = coverImageURL(for: sub) {
-                            MediaImageView(urlString: cover)
-                                .allowsHitTesting(false)
-                        } else {
-                            Image(systemName: "mappin.and.ellipse")
-                                .font(.title3)
-                                .foregroundStyle(.red)
+        HStack(spacing: 4) {
+            Button {
+                selectedSubMemoryID = selectedSubMemoryID == sub.id ? nil : sub.id
+                selectedSection = .photos
+            } label: {
+                HStack(spacing: 12) {
+                    Color(.secondarySystemBackground)
+                        .frame(width: 56, height: 56)
+                        .overlay {
+                            if let cover = coverImageURL(for: sub) {
+                                MediaImageView(urlString: cover)
+                                    .allowsHitTesting(false)
+                            } else {
+                                Image(systemName: "mappin.and.ellipse")
+                                    .font(.title3)
+                                    .foregroundStyle(.red)
+                            }
                         }
-                    }
-                    .clipShape(.rect(cornerRadius: 10))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(selectedSubMemoryID == sub.id ? Color.red : Color.clear, lineWidth: 2)
+                        .clipShape(.rect(cornerRadius: 10))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(selectedSubMemoryID == sub.id ? Color.red : Color.clear, lineWidth: 2)
+                        }
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(sub.title)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                        Text("\(photoCount(for: sub)) photos · \(videoCount(for: sub)) videos")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        HStack(spacing: 4) {
+                            Text(sub.dateRangeText)
+                            if let duration = sub.durationBadgeText {
+                                Text("·")
+                                Text(duration)
+                                    .foregroundStyle(.red)
+                            }
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                     }
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(sub.title)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    Text("\(photoCount(for: sub)) photos · \(videoCount(for: sub)) videos")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    HStack(spacing: 4) {
-                        Text(sub.dateRangeText)
-                        if let duration = sub.durationBadgeText {
-                            Text("·")
-                            Text(duration)
-                                .foregroundStyle(.red)
-                        }
+                    Spacer(minLength: 0)
+
+                    if !viewModel.isOwner(of: memoryID) {
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.tertiary)
                     }
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
                 }
-
-                Spacer()
-
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.tertiary)
+                .contentShape(.rect)
             }
-            .padding(10)
-            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+            .buttonStyle(.plain)
+
+            // Owners get a visible menu to edit or remove the pin, instead
+            // of relying on a hidden long-press.
+            if viewModel.isOwner(of: memoryID) {
+                Menu {
+                    Button {
+                        subMemoryToEdit = sub
+                    } label: {
+                        Label("Edit", systemImage: "pencil")
+                    }
+                    Button(role: .destructive) {
+                        subMemoryToDelete = sub
+                    } label: {
+                        Label("Remove Pin", systemImage: "trash")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 34, height: 44)
+                        .contentShape(.rect)
+                }
+            }
         }
-        .buttonStyle(.plain)
+        .padding(10)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
         .contextMenu {
             if viewModel.isOwner(of: memoryID) {
                 Button {
