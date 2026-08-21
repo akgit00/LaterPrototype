@@ -780,6 +780,7 @@ struct MemoryMediaSheet: View {
     /// The "+" customize menu, and whichever extras editor it (or a section
     /// button) opened.
     @State private var showAddMenu: Bool = false
+    @State private var sectionToClear: MediaSection?
     @State private var activeExtraSheet: MemoryExtraSheet?
 
     private var previewPlayer: PreviewPlayerService { .shared }
@@ -812,6 +813,21 @@ struct MemoryMediaSheet: View {
         case people = "People"
     }
 
+    /// Sections that always appear in the filter bar.
+    private static let coreSections: Set<MediaSection> = [.photos, .videos, .comments, .people]
+
+    /// Chips shown in the bar: core sections always, extras only once they
+    /// actually have content — so the bar stays uncluttered. The section you
+    /// are currently viewing stays visible (that's how + menu jumps land on
+    /// an empty section), then drops off the list when you move away.
+    private var visibleSections: [MediaSection] {
+        MediaSection.allCases.filter { section in
+            Self.coreSections.contains(section)
+                || section == selectedSection
+                || (badgeCount(for: section) ?? 0) > 0
+        }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -840,7 +856,7 @@ struct MemoryMediaSheet: View {
 
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
-                        ForEach(MediaSection.allCases, id: \.self) { section in
+                        ForEach(visibleSections, id: \.self) { section in
                             Button {
                                 selectedSection = section
                             } label: {
@@ -871,6 +887,15 @@ struct MemoryMediaSheet: View {
                                     , in: Capsule()
                                 )
                                 .foregroundStyle(selectedSection == section ? Color(.systemBackground) : .primary)
+                            }
+                            .contextMenu {
+                                if canClearSection(section) {
+                                    Button(role: .destructive) {
+                                        sectionToClear = section
+                                    } label: {
+                                        Label(clearLabel(for: section), systemImage: "trash")
+                                    }
+                                }
                             }
                         }
                     }
@@ -961,6 +986,22 @@ struct MemoryMediaSheet: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text("This video is still uploading from the person who added it. Try again in a moment.")
+        }
+        .confirmationDialog(
+            "Remove from this memory?",
+            isPresented: Binding(
+                get: { sectionToClear != nil },
+                set: { if !$0 { sectionToClear = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: sectionToClear
+        ) { section in
+            Button(clearLabel(for: section), role: .destructive) {
+                clearSection(section)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { section in
+            Text("This removes everything in \(section.rawValue) for everyone on this memory. The section disappears from the list until something is added again.")
         }
         .alert("Save to Photos", isPresented: Binding(
             get: { saveResultMessage != nil },
@@ -1170,6 +1211,84 @@ struct MemoryMediaSheet: View {
         case .linked: return "link"
         case .comments: return "bubble.left.fill"
         case .people: return "person.2.fill"
+        }
+    }
+
+    /// Owners can wipe an extra section's content from the chip's long-press
+    /// menu; core sections and empty sections offer nothing.
+    private func canClearSection(_ section: MediaSection) -> Bool {
+        !Self.coreSections.contains(section)
+            && viewModel.isOwner(of: memoryID)
+            && (badgeCount(for: section) ?? 0) > 0
+    }
+
+    private func clearLabel(for section: MediaSection) -> String {
+        switch section {
+        case .story: return "Remove all story entries"
+        case .inside: return "Remove all pinned memories"
+        case .voice: return "Remove all voice notes"
+        case .polls: return "Remove all polls"
+        case .prompts: return "Remove all prompts"
+        case .sealed: return "Remove all sealed notes"
+        case .keepsakes: return "Remove all keepsakes"
+        case .collections: return "Remove all collections"
+        case .playlist: return "Remove playlist & songs"
+        case .linked: return "Unlink all memories"
+        case .photos, .videos, .comments, .people: return ""
+        }
+    }
+
+    /// Deletes every item in the section, then hops back to Photos so the
+    /// emptied chip drops out of the bar immediately.
+    private func clearSection(_ section: MediaSection) {
+        switch section {
+        case .story:
+            for entry in memory.storyEntries {
+                viewModel.deleteStoryEntry(memoryID: memoryID, entryID: entry.id)
+            }
+        case .inside:
+            for sub in memory.subMemories {
+                viewModel.deleteSubMemory(memoryID: memoryID, subMemoryID: sub.id)
+            }
+        case .voice:
+            VoiceNotePlayer.shared.stop()
+            for note in memory.voiceNotes {
+                viewModel.deleteVoiceNote(memoryID: memoryID, noteID: note.id)
+            }
+        case .polls:
+            for poll in memory.polls {
+                viewModel.deletePoll(memoryID: memoryID, pollID: poll.id)
+            }
+        case .prompts:
+            for prompt in memory.prompts {
+                viewModel.deletePrompt(memoryID: memoryID, promptID: prompt.id)
+            }
+        case .sealed:
+            for note in memory.sealedNotes {
+                viewModel.deleteSealedNote(memoryID: memoryID, noteID: note.id)
+            }
+        case .keepsakes:
+            for keepsake in memory.keepsakes {
+                viewModel.deleteKeepsake(memoryID: memoryID, keepsakeID: keepsake.id)
+            }
+        case .collections:
+            for collection in memory.collections {
+                viewModel.deleteCollection(memoryID: memoryID, collectionID: collection.id)
+            }
+        case .playlist:
+            for song in memory.songs {
+                viewModel.removeSong(from: memoryID, song: song)
+            }
+            if memory.playlist != nil {
+                viewModel.removePlaylist(from: memoryID)
+            }
+        case .linked:
+            viewModel.setLinkedMemories(memoryID: memoryID, linkedIDs: [])
+        case .photos, .videos, .comments, .people:
+            break
+        }
+        if selectedSection == section {
+            selectedSection = .photos
         }
     }
 

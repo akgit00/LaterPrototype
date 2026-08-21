@@ -125,11 +125,17 @@ enum MapThemeSelection {
     }
 
     static func label(forRaw raw: String) -> String {
-        isCustomRaw(raw) ? "Community style" : MapThemeOption.stored(from: raw).label
+        if isCustomRaw(raw) {
+            return MapboxDesignerStyle.named(raw: raw)?.name ?? "Community style"
+        }
+        return MapThemeOption.stored(from: raw).label
     }
 
     static func detail(forRaw raw: String) -> String {
         if isCustomRaw(raw) {
+            if let designer = MapboxDesignerStyle.named(raw: raw) {
+                return designer.blurb
+            }
             return raw.replacingOccurrences(of: "mapbox://styles/", with: "")
         }
         return MapThemeOption.stored(from: raw).detail
@@ -177,6 +183,75 @@ enum MapThemeSelection {
             $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" || $0 == "."
         }
     }
+}
+
+/// Mapbox-made designer styles from the public style gallery. They are owned
+/// by the `mapbox` account, so they render with any access token — instant
+/// community styles with no Studio setup. Style URLs come from Mapbox's
+/// official style-templates catalog.
+struct MapboxDesignerStyle: Identifiable {
+    let name: String
+    let blurb: String
+    let swatch: Color
+    let raw: String
+
+    var id: String { raw }
+
+    /// The designer style matching a stored raw value, if any.
+    static func named(raw: String) -> MapboxDesignerStyle? {
+        gallery.first { $0.raw == raw }
+    }
+
+    static let gallery: [MapboxDesignerStyle] = [
+        MapboxDesignerStyle(
+            name: "North Star",
+            blurb: "A modern take on classic nautical charts",
+            swatch: Color(red: 0.0, green: 0.533, blue: 0.8),
+            raw: "mapbox://styles/mapbox/cj44mfrt20f082snokim4ungi"
+        ),
+        MapboxDesignerStyle(
+            name: "Ice Cream",
+            blurb: "Soft pastel purples, sweet and minimal",
+            swatch: Color(red: 0.58, green: 0.412, blue: 0.682),
+            raw: "mapbox://styles/mapbox/cj7t3i5yj0unt2rmt3y4b5e32"
+        ),
+        MapboxDesignerStyle(
+            name: "Moonlight",
+            blurb: "High-contrast dark, made for glowing pins",
+            swatch: Color(red: 0.2, green: 0.2, blue: 0.2),
+            raw: "mapbox://styles/mapbox/cj3kbeqzo00022smj7akz3o1e"
+        ),
+        MapboxDesignerStyle(
+            name: "Mineral",
+            blurb: "Inspired by a 1940s British mineral map",
+            swatch: Color(red: 0.918, green: 0.863, blue: 0.761),
+            raw: "mapbox://styles/mapbox/cjtep62gq54l21frr1whf27ak"
+        ),
+        MapboxDesignerStyle(
+            name: "Lè Shine",
+            blurb: "Restrained palette of winter light",
+            swatch: Color(red: 0.824, green: 0.894, blue: 0.937),
+            raw: "mapbox://styles/mapbox/cjcunv5ae262f2sm9tfwg8i0w"
+        ),
+        MapboxDesignerStyle(
+            name: "Cali Terrain",
+            blurb: "Warm hills from a plane-window view",
+            swatch: Color(red: 0.408, green: 0.541, blue: 0.678),
+            raw: "mapbox://styles/mapbox/cjerxnqt3cgvp2rmyuxbeqme7"
+        ),
+        MapboxDesignerStyle(
+            name: "Decimal",
+            blurb: "Vintage control-panel greens",
+            swatch: Color(red: 0.314, green: 0.659, blue: 0.51),
+            raw: "mapbox://styles/mapbox/cj5l80zrp29942rmtg0zctjto"
+        ),
+        MapboxDesignerStyle(
+            name: "Minimo",
+            blurb: "Clean Italian minimalism with stippling",
+            swatch: Color(red: 0.718, green: 0.733, blue: 0.737),
+            raw: "mapbox://styles/mapbox/cjku6bhmo15oz2rs8p2n9s2hm"
+        ),
+    ]
 }
 
 /// Shared camera math for the app's Mapbox maps.

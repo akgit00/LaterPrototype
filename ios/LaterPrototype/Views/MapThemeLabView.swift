@@ -265,7 +265,22 @@ struct MapThemeLabView: View {
                     activeCustomCard
                 }
 
-                Text("Use any public style from the Mapbox gallery or one you designed in Mapbox Studio: add the template to your Mapbox account, copy its style URL, and paste it here.")
+                Text("Designer styles from the Mapbox gallery — tap to try one:")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(MapboxDesignerStyle.gallery) { style in
+                            designerCard(style)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+
+                Divider()
+
+                Text("Or paste any public style URL — from the gallery or one you designed in Mapbox Studio (Share → copy Style URL).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -301,6 +316,49 @@ struct MapThemeLabView: View {
         }
     }
 
+    /// One-tap card for a Mapbox-made designer style.
+    private func designerCard(_ style: MapboxDesignerStyle) -> some View {
+        let isSelected = storedThemeRaw == style.raw
+        return Button {
+            select(style.raw)
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Circle()
+                        .fill(style.swatch.gradient)
+                        .frame(width: 22, height: 22)
+                        .overlay {
+                            Circle().strokeBorder(.black.opacity(0.1), lineWidth: 1)
+                        }
+                    Spacer()
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.body)
+                            .foregroundStyle(Color.accentColor)
+                            .transition(.scale.combined(with: .opacity))
+                    }
+                }
+                Text(style.name)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Text(style.blurb)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.leading)
+                    .lineLimit(2, reservesSpace: true)
+            }
+            .padding(10)
+            .frame(width: 140, alignment: .leading)
+            .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 12))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(isSelected ? Color.accentColor : .clear, lineWidth: 1.5)
+            }
+        }
+        .buttonStyle(.plain)
+        .animation(.spring(duration: 0.25), value: isSelected)
+    }
+
     /// Shown while a pasted community style is live, with a way back to the
     /// built-in default.
     private var activeCustomCard: some View {
@@ -310,7 +368,7 @@ struct MapThemeLabView: View {
                 .foregroundStyle(Color.accentColor)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("Community style active")
+                Text("\(MapThemeSelection.label(forRaw: storedThemeRaw)) active")
                     .font(.footnote.weight(.semibold))
                 Text(MapThemeSelection.detail(forRaw: storedThemeRaw))
                     .font(.caption2)
