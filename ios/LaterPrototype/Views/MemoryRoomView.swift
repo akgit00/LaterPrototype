@@ -32,6 +32,12 @@ struct MemoryRoomView: View {
     /// The memory-inside-a-memory currently selected on the map / in the
     /// media sheet. When set, the sheet shows only that pin's photos & videos.
     @State private var selectedSubMemoryID: UUID?
+    /// Per-pin progress (0…1) of its red thread drawing out from the hub,
+    /// driving the spiderweb expansion animation.
+    @State private var webRevealProgress: [UUID: Double] = [:]
+    /// Whether the hub card has popped in yet (first step of the expansion).
+    @State private var hubRevealed: Bool = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var previewPlayer: PreviewPlayerService { .shared }
 
@@ -61,12 +67,21 @@ struct MemoryRoomView: View {
         self.memoryID = memoryID
         self.viewModel = viewModel
         let mem = viewModel.memoryByID(memoryID)
-        let center = mem?.centerCoordinate ?? CLLocationCoordinate2D()
-        let span = mem?.spanDelta ?? 0.5
-        _mapPosition = State(initialValue: .region(MKCoordinateRegion(
-            center: center,
-            span: MKCoordinateSpan(latitudeDelta: span, longitudeDelta: span)
-        )))
+        let hasWeb = !(mem?.subMemories.isEmpty ?? true)
+        // A memory with pins inside opens with the media sheet collapsed and
+        // the camera framing the whole web above it, so the expansion
+        // animation plays in full view instead of behind the sheet.
+        _selectedDetent = State(initialValue: hasWeb ? .fraction(0.15) : .fraction(0.45))
+        if hasWeb, let mem, let region = Self.spiderwebRegion(for: mem, sheetFraction: 0.15) {
+            _mapPosition = State(initialValue: .region(region))
+        } else {
+            let center = mem?.centerCoordinate ?? CLLocationCoordinate2D()
+            let span = mem?.spanDelta ?? 0.5
+            _mapPosition = State(initialValue: .region(MKCoordinateRegion(
+                center: center,
+                span: MKCoordinateSpan(latitudeDelta: span, longitudeDelta: span)
+            )))
+        }
     }
 
     var body: some View {
@@ -95,14 +110,21 @@ struct MemoryRoomView: View {
                 }
 
                 // The spiderweb: red threads from the main memory out to each
-                // memory pinned inside it, each with a photo preview.
+                // memory pinned inside it, each with a photo preview. On open
+                // the hub pops in first, then each thread draws outward and
+                // its pin springs in.
                 if !memory.subMemories.isEmpty {
                     ForEach(memory.subMemories) { sub in
-                        MapPolyline(coordinates: [memory.centerCoordinate, sub.coordinate])
+                        if (webRevealProgress[sub.id] ?? 0) > 0.01 {
+                            MapPolyline(coordinates: [
+                                memory.centerCoordinate,
+                                threadEndpoint(for: sub, progress: webRevealProgress[sub.id] ?? 0)
+                            ])
                             .stroke(
                                 .red.opacity(selectedSubMemoryID == nil || selectedSubMemoryID == sub.id ? 0.9 : 0.35),
                                 style: StrokeStyle(lineWidth: 2.5, lineCap: .round)
                             )
+                        }
                     }
 
                     ForEach(memory.subMemories) { sub in
@@ -113,8 +135,12 @@ struct MemoryRoomView: View {
                                 SubMemoryPinCard(
                                     imageURL: coverImageURL(for: sub),
                                     mediaCount: mediaCount(for: sub),
-                                    isSelected: selectedSubMemoryID == sub.id
+                                    isSelected: selectedSubMemoryID == sub.id,
+                                    durationText: sub.durationBadgeText
                                 )
+                                .scaleEffect(isPinRevealed(sub) ? 1 : 0.01, anchor: .bottom)
+                                .opacity(isPinRevealed(sub) ? 1 : 0)
+                                .animation(.spring(duration: 0.5, bounce: 0.55), value: isPinRevealed(sub))
                             }
                             .buttonStyle(.plain)
                         }
@@ -126,8 +152,12 @@ struct MemoryRoomView: View {
                         } label: {
                             MemoryHubPinCard(
                                 imageURL: memory.photoURLs.first,
-                                isDimmed: selectedSubMemoryID != nil
+                                isDimmed: selectedSubMemoryID != nil,
+                                insideCount: memory.subMemories.count
                             )
+                            .scaleEffect(hubRevealed ? 1 : 0.01, anchor: .bottom)
+                            .opacity(hubRevealed ? 1 : 0)
+                            .animation(.spring(duration: 0.5, bounce: 0.4), value: hubRevealed)
                         }
                         .buttonStyle(.plain)
                     }
@@ -154,10 +184,12 @@ struct MemoryRoomView: View {
             if let region = spiderwebRegion() {
                 mapPosition = .region(region)
             }
+            animateWebExpansion()
         }
         // Refit the camera when pins inside the memory appear or change, so
         // the whole web stays visible.
         .onChange(of: memory.subMemories.count) { _, _ in
+            animateWebExpansion()
             guard selectedSubMemoryID == nil, let region = spiderwebRegion() else { return }
             withAnimation(.spring(duration: 0.6)) {
                 mapPosition = .region(region)
@@ -202,6 +234,74 @@ struct MemoryRoomView: View {
     }
 
     // MARK: - Memories inside (spiderweb)
+
+    /// Whether a pin's thread has drawn far enough for the pin to spring in.
+    private func isPinRevealed(_ sub: SubMemory) -> Bool {
+        (webRevealProgress[sub.id] ?? 0) >= 0.65
+    }
+
+    /// Point along the thread from the hub toward a pin for its progress.
+    private func threadEndpoint(for sub: SubMemory, progress: Double) -> CLLocationCoordinate2D {
+        let t = min(max(progress, 0), 1)
+        let start = memory.centerCoordinate
+        return CLLocationCoordinate2D(
+            latitude: start.latitude + (sub.coordinate.latitude - start.latitude) * t,
+            longitude: start.longitude + (sub.coordinate.longitude - start.longitude) * t
+        )
+    }
+
+    /// Plays the web-spinning moment: the hub pops in, then each thread
+    /// draws out to its pin one after another and the pin springs in.
+    /// Already-revealed pins stay put — only new ones animate, so a pin
+    /// added later grows its own thread live.
+    private func animateWebExpansion() {
+        guard !memory.subMemories.isEmpty else { return }
+        let pending = memory.subMemories.filter { webRevealProgress[$0.id] == nil }
+        guard !pending.isEmpty else {
+            hubRevealed = true
+            return
+        }
+
+        if reduceMotion {
+            hubRevealed = true
+            for sub in memory.subMemories { webRevealProgress[sub.id] = 1 }
+            return
+        }
+
+        let isFirstReveal = !hubRevealed
+        // Claim the pins now so repeated onAppear/onChange calls can't
+        // schedule the same pin twice while the intro delay is running.
+        for sub in pending { webRevealProgress[sub.id] = 0 }
+
+        Task {
+            // On first open, hold until the satellite imagery has had time
+            // to render — otherwise the show plays behind the loading tiles.
+            if isFirstReveal {
+                try? await Task.sleep(for: .milliseconds(1200))
+            }
+            hubRevealed = true
+
+            for (offset, sub) in pending.enumerated() {
+                Task {
+                    let delay = (isFirstReveal ? 550 : 150) + offset * 260
+                    try? await Task.sleep(for: .milliseconds(delay))
+                    await drawThread(to: sub.id)
+                }
+            }
+        }
+    }
+
+    /// Ramps one thread's progress 0→1 with an ease-out so it shoots out of
+    /// the hub and lands softly at its pin.
+    private func drawThread(to subID: UUID) async {
+        let steps = 20
+        for step in 1...steps {
+            let t = Double(step) / Double(steps)
+            webRevealProgress[subID] = 1 - pow(1 - t, 3)
+            try? await Task.sleep(for: .milliseconds(28))
+        }
+        webRevealProgress[subID] = 1
+    }
 
     /// Cover image for a pinned memory: its first photo, else a video thumbnail.
     private func coverImageURL(for sub: SubMemory) -> String? {
@@ -250,8 +350,20 @@ struct MemoryRoomView: View {
     }
 
     /// A camera region that fits the main memory and every memory pinned
-    /// inside it, with padding so the whole web is on screen.
+    /// inside it, sized for the strip of map visible above the media sheet.
     private func spiderwebRegion() -> MKCoordinateRegion? {
+        Self.spiderwebRegion(for: memory, sheetFraction: currentSheetFraction)
+    }
+
+    /// How much of the screen the media sheet currently covers from the bottom.
+    private var currentSheetFraction: Double {
+        selectedDetent == .fraction(0.15) ? 0.15 : 0.45
+    }
+
+    /// Frames the web in the visible band between the floating header and the
+    /// media sheet: zooms so the web's height fits the band, then shifts the
+    /// camera center so the web sits in that band instead of behind the sheet.
+    private static func spiderwebRegion(for memory: Memory, sheetFraction: Double) -> MKCoordinateRegion? {
         guard !memory.subMemories.isEmpty else { return nil }
         var minLat = memory.centerCoordinate.latitude
         var maxLat = minLat
@@ -263,15 +375,35 @@ struct MemoryRoomView: View {
             minLon = min(minLon, sub.coordinate.longitude)
             maxLon = max(maxLon, sub.coordinate.longitude)
         }
+
+        // Screen band (fractions from the top) the pins should occupy:
+        // below the header, above the sheet, with margin for the pin cards.
+        let bandTop = 0.30
+        let bandBottom = sheetFraction <= 0.2 ? 0.70 : 0.46
+        let bandHeight = bandBottom - bandTop
+
+        let webCenterLat = (minLat + maxLat) / 2
+        let webCenterLon = (minLon + maxLon) / 2
+
+        // Zoom out until the web's span fits the band vertically and ~60%
+        // of the screen width horizontally.
+        let latDelta = max((maxLat - minLat) / bandHeight, 0.02)
+        let lonDelta = max((maxLon - minLon) / 0.6, 0.02)
+
+        // MapKit shows whichever axis demands more zoom; estimate the final
+        // visible latitude window (portrait phone) so placement holds even
+        // when the web is wider than it is tall.
+        let aspect = 2.16
+        let lonAsLat = lonDelta * cos(webCenterLat * .pi / 180) * aspect
+        let visibleLat = max(latDelta, lonAsLat)
+
+        // Place the web's center at the band's center rather than mid-screen.
+        let bandCenter = (bandTop + bandBottom) / 2
+        let centerLat = webCenterLat - (0.5 - bandCenter) * visibleLat
+
         return MKCoordinateRegion(
-            center: CLLocationCoordinate2D(
-                latitude: (minLat + maxLat) / 2,
-                longitude: (minLon + maxLon) / 2
-            ),
-            span: MKCoordinateSpan(
-                latitudeDelta: max((maxLat - minLat) * 1.7, 0.025),
-                longitudeDelta: max((maxLon - minLon) * 1.7, 0.025)
-            )
+            center: CLLocationCoordinate2D(latitude: centerLat, longitude: webCenterLon),
+            span: MKCoordinateSpan(latitudeDelta: visibleLat, longitudeDelta: lonDelta)
         )
     }
 
@@ -989,9 +1121,16 @@ struct MemoryMediaSheet: View {
                     Text("\(photoCount(for: sub)) photos · \(videoCount(for: sub)) videos")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text(sub.date, style: .date)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                    HStack(spacing: 4) {
+                        Text(sub.dateRangeText)
+                        if let duration = sub.durationBadgeText {
+                            Text("·")
+                            Text(duration)
+                                .foregroundStyle(.red)
+                        }
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
                 }
 
                 Spacer()
