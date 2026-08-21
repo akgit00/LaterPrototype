@@ -71,6 +71,11 @@ final class LaterViewModel {
     /// middle of a post never wipes a just-typed comment off screen.
     private var pendingComments: [UUID: [Comment]] = [:]
 
+    /// Optimistic extras (story entries, votes, voice notes, …) not yet
+    /// confirmed by the server, keyed by memory id — same idea as
+    /// `pendingComments`, so a mid-post poll can't wipe fresh items.
+    private var pendingExtras: [UUID: [MemoryExtraRow]] = [:]
+
     /// Media rows whose local-file repair has already been attempted this
     /// session, so the healing pass doesn't re-upload on every poll.
     private var healedMediaRowIDs: Set<UUID> = []
@@ -199,26 +204,27 @@ final class LaterViewModel {
             // Cloud payloads carry a stale/empty comments array (comments live in
             // their own table). Carry over the comments we already have in memory
             // so a poll never blanks a just-posted comment before the merge runs.
-            let existingComments = Dictionary(
-                memories.map { ($0.id, $0.comments) },
-                uniquingKeysWith: { first, _ in first }
-            )
-            let existingSubMemories = Dictionary(
-                memories.map { ($0.id, $0.subMemories) },
+            let existingByID = Dictionary(
+                memories.map { ($0.id, $0) },
                 uniquingKeysWith: { first, _ in first }
             )
             var updated = rows
                 .map { $0.payload }
                 .sorted { $0.date > $1.date }
             for index in updated.indices {
-                if let carried = existingComments[updated[index].id] {
+                if let carried = existingByID[updated[index].id]?.comments {
                     updated[index].comments = carried
                 }
-                // Keep local sub-memories while their payload push is in
+                // Keep locally-edited payload fields while their push is in
                 // flight (the fetched payload may predate the edit).
                 if pendingPayloadPushes[updated[index].id] != nil,
-                   let localSubs = existingSubMemories[updated[index].id] {
-                    updated[index].subMemories = localSubs
+                   let local = existingByID[updated[index].id] {
+                    updated[index].subMemories = local.subMemories
+                    updated[index].collections = local.collections
+                    updated[index].linkedMemoryIDs = local.linkedMemoryIDs
+                    updated[index].weather = local.weather
+                    updated[index].pinStyle = local.pinStyle
+                    updated[index].mapTheme = local.mapTheme
                 }
                 Self.stripUnreadableLocalMedia(from: &updated[index])
             }
@@ -229,6 +235,17 @@ final class LaterViewModel {
             let mediaRows = await fetchRows("Media") { try await MediaService.fetch(memoryIDs: ids) }
             let playlistRows = await fetchRows("Playlists") { try await PlaylistService.fetch(memoryIDs: ids) }
             let songRows = await fetchRows("Songs") { try await SongService.fetch(memoryIDs: ids) }
+
+            // Extras are fetched separately from `fetchRows`: a failed fetch
+            // must KEEP existing items (merging an empty list would blank
+            // every story, poll, and voice note until the next poll).
+            var extraRows: [MemoryExtraRow]?
+            do {
+                extraRows = try await MemoryExtrasService.fetch(memoryIDs: ids)
+            } catch {
+                syncError = "Extras: \(error.localizedDescription)"
+                extraRows = nil
+            }
 
             // One profile lookup covering share recipients, comment authors, and
             // the owners of memories shared with me (so guests can show them).
@@ -250,6 +267,15 @@ final class LaterViewModel {
             mergeMedia(into: &updated, rows: mediaRows)
             mergePlaylists(into: &updated, rows: playlistRows)
             mergeSongs(into: &updated, rows: songRows)
+            if let extraRows {
+                mergeExtras(into: &updated, rows: extraRows)
+            } else {
+                for index in updated.indices {
+                    if let existing = existingByID[updated[index].id] {
+                        Self.carryExtras(from: existing, into: &updated[index])
+                    }
+                }
+            }
 
             if updated != memories {
                 memories = updated
@@ -733,6 +759,8 @@ final class LaterViewModel {
         }
         rebuildGlobalPins()
         persist()
+        // Stop any yearly anniversary reminder scheduled for this memory.
+        AnniversaryReminderService.shared.removeReminder(for: id)
         if wasOwned {
             Task { try? await CloudMemoryService.deleteMemory(id: id) }
         }
@@ -768,6 +796,437 @@ final class LaterViewModel {
         Task {
             try? await MediaService.deleteVideo(id: video.id)
             await pushMemory(memoryID)
+        }
+    }
+
+    // MARK: - Memory extras (story, voice, sealed, polls, prompts, keepsakes)
+
+    /// The name new contributions are signed with — the user's chosen display
+    /// name, falling back to their @username or email prefix.
+    var extrasAuthorName: String {
+        let emailFallback = currentEmail.split(separator: "@").first.map(String.init)
+        let chosen = currentDisplayName?.isEmpty == false ? currentDisplayName : nil
+        return chosen ?? currentUsername ?? emailFallback ?? "You"
+    }
+
+    /// Whether a synced item was written by the signed-in user (or created on
+    /// this device before sign-in).
+    func isAuthor(_ authorID: String) -> Bool {
+        if authorID.isEmpty { return true }
+        return authorID == currentUserID
+    }
+
+    private func makeExtraRow(memoryID: UUID, kind: String, payload: String) -> MemoryExtraRow {
+        MemoryExtraRow(
+            id: UUID(),
+            memory_id: memoryID,
+            author_id: currentUserID ?? "",
+            author_name: extrasAuthorName,
+            kind: kind,
+            payload: payload,
+            created_at: Date()
+        )
+    }
+
+    /// Stages an optimistic row and posts it to the shared table.
+    private func submitExtra(_ row: MemoryExtraRow) {
+        pendingExtras[row.memory_id, default: []].append(row)
+        guard SupabaseREST.hasSession else { return }
+        Task {
+            do {
+                try await MemoryExtrasService.post(row)
+            } catch {
+                syncError = "Sync: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// Rewrites a row's payload locally (pending copy included) and remotely.
+    private func updateExtraRow(id: UUID, memoryID: UUID, payload: String) {
+        if let pendingIndex = pendingExtras[memoryID]?.firstIndex(where: { $0.id == id }) {
+            pendingExtras[memoryID]?[pendingIndex] = pendingExtras[memoryID]![pendingIndex].withPayload(payload)
+        }
+        guard SupabaseREST.hasSession else { return }
+        Task { try? await MemoryExtrasService.updatePayload(id: id, payload: payload) }
+    }
+
+    private func removeExtra(id: UUID, memoryID: UUID) {
+        pendingExtras[memoryID]?.removeAll { $0.id == id }
+        guard SupabaseREST.hasSession else { return }
+        Task { try? await MemoryExtrasService.delete(id: id) }
+    }
+
+    /// Rebuilds every memory's extras from the shared rows plus anything
+    /// still pending locally.
+    @MainActor
+    private func mergeExtras(into memories: inout [Memory], rows: [MemoryExtraRow]) {
+        var grouped = Dictionary(grouping: rows, by: { $0.memory_id })
+        for (memoryID, pending) in pendingExtras {
+            let serverIDs = Set(grouped[memoryID, default: []].map(\.id))
+            let stillPending = pending.filter { !serverIDs.contains($0.id) }
+            if stillPending.isEmpty {
+                pendingExtras.removeValue(forKey: memoryID)
+            } else {
+                pendingExtras[memoryID] = stillPending
+            }
+            grouped[memoryID, default: []].append(contentsOf: stillPending)
+        }
+        for index in memories.indices {
+            let mine = (grouped[memories[index].id] ?? []).sorted { $0.created_at < $1.created_at }
+            Self.applyExtraRows(mine, to: &memories[index])
+        }
+    }
+
+    /// Keeps a memory's previously-merged extras when a fresh fetch failed.
+    nonisolated private static func carryExtras(from existing: Memory, into memory: inout Memory) {
+        memory.storyEntries = existing.storyEntries
+        memory.voiceNotes = existing.voiceNotes
+        memory.sealedNotes = existing.sealedNotes
+        memory.polls = existing.polls
+        memory.prompts = existing.prompts
+        memory.keepsakes = existing.keepsakes
+    }
+
+    /// Turns raw extras rows (oldest first) into the memory's typed lists.
+    /// The newest vote/answer per person wins, so edits replace originals.
+    nonisolated private static func applyExtraRows(_ rows: [MemoryExtraRow], to memory: inout Memory) {
+        var stories: [StoryEntry] = []
+        var voices: [VoiceNote] = []
+        var sealed: [SealedNote] = []
+        var keepsakes: [Keepsake] = []
+        var polls: [MemoryPoll] = []
+        var votesByPoll: [UUID: [PollVote]] = [:]
+        var prompts: [MemoryPrompt] = []
+        var answersByPrompt: [UUID: [PromptAnswer]] = [:]
+
+        for row in rows {
+            switch row.kind {
+            case MemoryExtraKind.story:
+                guard let p = ExtraPayloadCoder.decode(StoryPayload.self, from: row.payload) else { continue }
+                stories.append(StoryEntry(id: row.id, authorID: row.author_id, authorName: row.author_name, text: p.text, date: row.created_at))
+            case MemoryExtraKind.voice:
+                guard let p = ExtraPayloadCoder.decode(VoicePayload.self, from: row.payload) else { continue }
+                voices.append(VoiceNote(id: row.id, authorID: row.author_id, authorName: row.author_name, title: p.title, audioURL: p.audioURL, duration: p.duration, date: row.created_at))
+            case MemoryExtraKind.sealed:
+                guard let p = ExtraPayloadCoder.decode(SealedPayload.self, from: row.payload) else { continue }
+                sealed.append(SealedNote(id: row.id, authorID: row.author_id, authorName: row.author_name, text: p.text, unlockDate: p.unlockDate, date: row.created_at))
+            case MemoryExtraKind.keepsake:
+                guard let p = ExtraPayloadCoder.decode(KeepsakePayload.self, from: row.payload) else { continue }
+                keepsakes.append(Keepsake(id: row.id, authorID: row.author_id, authorName: row.author_name, kind: p.kind, title: p.title, note: p.note, imageURL: p.imageURL, date: row.created_at))
+            case MemoryExtraKind.poll:
+                guard let p = ExtraPayloadCoder.decode(PollPayload.self, from: row.payload) else { continue }
+                polls.append(MemoryPoll(id: row.id, authorID: row.author_id, authorName: row.author_name, question: p.question, options: p.options, votes: [], date: row.created_at))
+            case MemoryExtraKind.pollVote:
+                guard let p = ExtraPayloadCoder.decode(VotePayload.self, from: row.payload) else { continue }
+                votesByPoll[p.pollID, default: []].append(PollVote(id: row.id, voterID: row.author_id, voterName: row.author_name, optionID: p.optionID))
+            case MemoryExtraKind.prompt:
+                guard let p = ExtraPayloadCoder.decode(PromptPayload.self, from: row.payload) else { continue }
+                prompts.append(MemoryPrompt(id: row.id, authorID: row.author_id, authorName: row.author_name, question: p.question, answers: [], date: row.created_at))
+            case MemoryExtraKind.promptAnswer:
+                guard let p = ExtraPayloadCoder.decode(AnswerPayload.self, from: row.payload) else { continue }
+                answersByPrompt[p.promptID, default: []].append(PromptAnswer(id: row.id, authorID: row.author_id, authorName: row.author_name, text: p.text, date: row.created_at))
+            default:
+                continue
+            }
+        }
+
+        memory.storyEntries = stories
+        memory.voiceNotes = voices
+        memory.sealedNotes = sealed
+        memory.keepsakes = keepsakes
+        memory.polls = polls.map { poll in
+            var poll = poll
+            var latestByVoter: [String: PollVote] = [:]
+            for vote in votesByPoll[poll.id] ?? [] where poll.options.contains(where: { $0.id == vote.optionID }) {
+                latestByVoter[vote.voterID] = vote
+            }
+            // Stable order so background polls don't register as changes.
+            poll.votes = latestByVoter.values.sorted { $0.voterID < $1.voterID }
+            return poll
+        }
+        memory.prompts = prompts.map { prompt in
+            var prompt = prompt
+            var latestByAuthor: [String: PromptAnswer] = [:]
+            for answer in answersByPrompt[prompt.id] ?? [] {
+                latestByAuthor[answer.authorID] = answer
+            }
+            prompt.answers = latestByAuthor.values.sorted { $0.date < $1.date }
+            return prompt
+        }
+    }
+
+    // MARK: Story
+
+    func addStoryEntry(to memoryID: UUID, text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let index = memories.firstIndex(where: { $0.id == memoryID }),
+              let payload = ExtraPayloadCoder.encode(StoryPayload(text: trimmed)) else { return }
+        let row = makeExtraRow(memoryID: memoryID, kind: MemoryExtraKind.story, payload: payload)
+        memories[index].storyEntries.append(
+            StoryEntry(id: row.id, authorID: row.author_id, authorName: row.author_name, text: trimmed, date: row.created_at)
+        )
+        submitExtra(row)
+        persist()
+    }
+
+    func updateStoryEntry(memoryID: UUID, entryID: UUID, text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let index = memories.firstIndex(where: { $0.id == memoryID }),
+              let entryIndex = memories[index].storyEntries.firstIndex(where: { $0.id == entryID }),
+              let payload = ExtraPayloadCoder.encode(StoryPayload(text: trimmed)) else { return }
+        memories[index].storyEntries[entryIndex].text = trimmed
+        updateExtraRow(id: entryID, memoryID: memoryID, payload: payload)
+        persist()
+    }
+
+    func deleteStoryEntry(memoryID: UUID, entryID: UUID) {
+        guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        memories[index].storyEntries.removeAll { $0.id == entryID }
+        removeExtra(id: entryID, memoryID: memoryID)
+        persist()
+    }
+
+    // MARK: Voice notes
+
+    /// Uploads the recording (when signed in) and attaches it to the memory.
+    func addVoiceNote(to memoryID: UUID, title: String, localFileURL: URL, duration: Double) async {
+        guard memories.contains(where: { $0.id == memoryID }) else { return }
+        var audioURL = localFileURL.absoluteString
+        if SupabaseREST.hasSession, let data = try? Data(contentsOf: localFileURL) {
+            let path = "\(memoryID.uuidString)/voice/\(UUID().uuidString).m4a"
+            if let remote = try? await SupabaseREST.uploadMedia(data, path: path, contentType: "audio/mp4") {
+                audioURL = remote
+                MediaStore.deleteFile(at: localFileURL.absoluteString)
+            }
+        }
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalTitle = trimmed.isEmpty ? "Voice note" : trimmed
+        guard let payload = ExtraPayloadCoder.encode(VoicePayload(title: finalTitle, audioURL: audioURL, duration: duration)),
+              let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        let row = makeExtraRow(memoryID: memoryID, kind: MemoryExtraKind.voice, payload: payload)
+        memories[index].voiceNotes.append(
+            VoiceNote(id: row.id, authorID: row.author_id, authorName: row.author_name, title: finalTitle, audioURL: audioURL, duration: duration, date: row.created_at)
+        )
+        submitExtra(row)
+        persist()
+    }
+
+    func deleteVoiceNote(memoryID: UUID, noteID: UUID) {
+        guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        if let note = memories[index].voiceNotes.first(where: { $0.id == noteID }) {
+            MediaStore.deleteFile(at: note.audioURL)
+        }
+        memories[index].voiceNotes.removeAll { $0.id == noteID }
+        removeExtra(id: noteID, memoryID: memoryID)
+        persist()
+    }
+
+    // MARK: Sealed notes
+
+    func addSealedNote(to memoryID: UUID, text: String, unlockDate: Date) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let index = memories.firstIndex(where: { $0.id == memoryID }),
+              let payload = ExtraPayloadCoder.encode(SealedPayload(text: trimmed, unlockDate: unlockDate)) else { return }
+        let row = makeExtraRow(memoryID: memoryID, kind: MemoryExtraKind.sealed, payload: payload)
+        memories[index].sealedNotes.append(
+            SealedNote(id: row.id, authorID: row.author_id, authorName: row.author_name, text: trimmed, unlockDate: unlockDate, date: row.created_at)
+        )
+        submitExtra(row)
+        persist()
+    }
+
+    func deleteSealedNote(memoryID: UUID, noteID: UUID) {
+        guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        memories[index].sealedNotes.removeAll { $0.id == noteID }
+        removeExtra(id: noteID, memoryID: memoryID)
+        persist()
+    }
+
+    // MARK: Polls
+
+    func addPoll(to memoryID: UUID, question: String, options: [String]) {
+        let trimmedQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanOptions = options
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .map { PollOption(text: $0) }
+        guard !trimmedQuestion.isEmpty, cleanOptions.count >= 2,
+              let index = memories.firstIndex(where: { $0.id == memoryID }),
+              let payload = ExtraPayloadCoder.encode(PollPayload(question: trimmedQuestion, options: cleanOptions)) else { return }
+        let row = makeExtraRow(memoryID: memoryID, kind: MemoryExtraKind.poll, payload: payload)
+        memories[index].polls.append(
+            MemoryPoll(id: row.id, authorID: row.author_id, authorName: row.author_name, question: trimmedQuestion, options: cleanOptions, votes: [], date: row.created_at)
+        )
+        submitExtra(row)
+        persist()
+    }
+
+    func deletePoll(memoryID: UUID, pollID: UUID) {
+        guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        memories[index].polls.removeAll { $0.id == pollID }
+        removeExtra(id: pollID, memoryID: memoryID)
+        persist()
+    }
+
+    /// Casts, changes, or clears (tap the same option again) the user's vote.
+    func votePoll(memoryID: UUID, pollID: UUID, optionID: UUID) {
+        guard let index = memories.firstIndex(where: { $0.id == memoryID }),
+              let pollIndex = memories[index].polls.firstIndex(where: { $0.id == pollID }),
+              memories[index].polls[pollIndex].options.contains(where: { $0.id == optionID }),
+              let payload = ExtraPayloadCoder.encode(VotePayload(pollID: pollID, optionID: optionID)) else { return }
+
+        if let voteIndex = memories[index].polls[pollIndex].votes.firstIndex(where: { isAuthor($0.voterID) }) {
+            let existing = memories[index].polls[pollIndex].votes[voteIndex]
+            if existing.optionID == optionID {
+                memories[index].polls[pollIndex].votes.remove(at: voteIndex)
+                removeExtra(id: existing.id, memoryID: memoryID)
+            } else {
+                memories[index].polls[pollIndex].votes[voteIndex].optionID = optionID
+                updateExtraRow(id: existing.id, memoryID: memoryID, payload: payload)
+            }
+        } else {
+            let row = makeExtraRow(memoryID: memoryID, kind: MemoryExtraKind.pollVote, payload: payload)
+            memories[index].polls[pollIndex].votes.append(
+                PollVote(id: row.id, voterID: row.author_id, voterName: row.author_name, optionID: optionID)
+            )
+            submitExtra(row)
+        }
+        persist()
+    }
+
+    // MARK: Prompts
+
+    func addPrompt(to memoryID: UUID, question: String) {
+        let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let index = memories.firstIndex(where: { $0.id == memoryID }),
+              let payload = ExtraPayloadCoder.encode(PromptPayload(question: trimmed)) else { return }
+        let row = makeExtraRow(memoryID: memoryID, kind: MemoryExtraKind.prompt, payload: payload)
+        memories[index].prompts.append(
+            MemoryPrompt(id: row.id, authorID: row.author_id, authorName: row.author_name, question: trimmed, answers: [], date: row.created_at)
+        )
+        submitExtra(row)
+        persist()
+    }
+
+    func deletePrompt(memoryID: UUID, promptID: UUID) {
+        guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        memories[index].prompts.removeAll { $0.id == promptID }
+        removeExtra(id: promptID, memoryID: memoryID)
+        persist()
+    }
+
+    /// Adds or rewrites the user's one answer to a prompt.
+    func answerPrompt(memoryID: UUID, promptID: UUID, text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let index = memories.firstIndex(where: { $0.id == memoryID }),
+              let promptIndex = memories[index].prompts.firstIndex(where: { $0.id == promptID }),
+              let payload = ExtraPayloadCoder.encode(AnswerPayload(promptID: promptID, text: trimmed)) else { return }
+
+        if let answerIndex = memories[index].prompts[promptIndex].answers.firstIndex(where: { isAuthor($0.authorID) }) {
+            let existing = memories[index].prompts[promptIndex].answers[answerIndex]
+            memories[index].prompts[promptIndex].answers[answerIndex].text = trimmed
+            updateExtraRow(id: existing.id, memoryID: memoryID, payload: payload)
+        } else {
+            let row = makeExtraRow(memoryID: memoryID, kind: MemoryExtraKind.promptAnswer, payload: payload)
+            memories[index].prompts[promptIndex].answers.append(
+                PromptAnswer(id: row.id, authorID: row.author_id, authorName: row.author_name, text: trimmed, date: row.created_at)
+            )
+            submitExtra(row)
+        }
+        persist()
+    }
+
+    // MARK: Keepsakes
+
+    /// Attaches a keepsake, uploading its photo first when signed in.
+    func addKeepsake(to memoryID: UUID, kind: KeepsakeKind, title: String, note: String, imageData: Data?) async {
+        guard memories.contains(where: { $0.id == memoryID }) else { return }
+        var imageURL: String?
+        if let imageData {
+            imageURL = MediaStore.saveImage(imageData)
+            if SupabaseREST.hasSession {
+                let path = "\(memoryID.uuidString)/keepsakes/\(UUID().uuidString).jpg"
+                if let remote = try? await SupabaseREST.uploadMedia(imageData, path: path, contentType: "image/jpeg") {
+                    if let local = imageURL { MediaStore.deleteFile(at: local) }
+                    imageURL = remote
+                }
+            }
+        }
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalTitle = trimmedTitle.isEmpty ? kind.label : trimmedTitle
+        let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let payload = ExtraPayloadCoder.encode(KeepsakePayload(kind: kind.rawValue, title: finalTitle, note: trimmedNote, imageURL: imageURL)),
+              let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        let row = makeExtraRow(memoryID: memoryID, kind: MemoryExtraKind.keepsake, payload: payload)
+        memories[index].keepsakes.append(
+            Keepsake(id: row.id, authorID: row.author_id, authorName: row.author_name, kind: kind.rawValue, title: finalTitle, note: trimmedNote, imageURL: imageURL, date: row.created_at)
+        )
+        submitExtra(row)
+        persist()
+    }
+
+    func deleteKeepsake(memoryID: UUID, keepsakeID: UUID) {
+        guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        if let keepsake = memories[index].keepsakes.first(where: { $0.id == keepsakeID }),
+           let imageURL = keepsake.imageURL {
+            MediaStore.deleteFile(at: imageURL)
+        }
+        memories[index].keepsakes.removeAll { $0.id == keepsakeID }
+        removeExtra(id: keepsakeID, memoryID: memoryID)
+        persist()
+    }
+
+    // MARK: Owner-curated details (collections, links, weather, pin style)
+
+    private func updateOwnedPayload(_ memoryID: UUID, _ mutate: (inout Memory) -> Void) {
+        guard isOwned(memoryID),
+              let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        mutate(&memories[index])
+        persist()
+        schedulePayloadPush(memoryID)
+    }
+
+    func addCollection(to memoryID: UUID, name: String, emoji: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        updateOwnedPayload(memoryID) {
+            $0.collections.append(MemoryCollection(name: trimmed, emoji: emoji))
+        }
+    }
+
+    func deleteCollection(memoryID: UUID, collectionID: UUID) {
+        updateOwnedPayload(memoryID) {
+            $0.collections.removeAll { $0.id == collectionID }
+        }
+    }
+
+    func setCollectionPhotos(memoryID: UUID, collectionID: UUID, photoURLs: [String]) {
+        updateOwnedPayload(memoryID) { memory in
+            guard let index = memory.collections.firstIndex(where: { $0.id == collectionID }) else { return }
+            memory.collections[index].photoURLs = photoURLs
+        }
+    }
+
+    func setLinkedMemories(memoryID: UUID, linkedIDs: [UUID]) {
+        updateOwnedPayload(memoryID) {
+            $0.linkedMemoryIDs = linkedIDs.filter { $0 != memoryID }
+        }
+    }
+
+    func setWeather(for memoryID: UUID, weather: WeatherSnapshot?) {
+        updateOwnedPayload(memoryID) {
+            $0.weather = weather
+        }
+    }
+
+    func setPinStyle(for memoryID: UUID, style: MemoryPinStyle?) {
+        updateOwnedPayload(memoryID) {
+            $0.pinStyle = style
         }
     }
 

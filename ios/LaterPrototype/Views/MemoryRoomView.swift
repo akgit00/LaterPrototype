@@ -60,6 +60,9 @@ struct MemoryRoomView: View {
     @State private var mapSubMemoryToEdit: SubMemory?
     /// Pinned memory pending removal straight from its map pin (long-press).
     @State private var mapSubMemoryToDelete: SubMemory?
+    /// Opens the weather & mood editor (presented from the media sheet, since
+    /// it is always on screen and owns sheet presentation).
+    @State private var showWeatherSheet: Bool = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var previewPlayer: PreviewPlayerService { .shared }
@@ -156,6 +159,7 @@ struct MemoryRoomView: View {
                 playingVideoURL: $playingVideoURL,
                 showAddPeopleSheet: $showAddPeopleSheet,
                 showEditMemorySheet: $showEditMemorySheet,
+                showWeatherSheet: $showWeatherSheet,
                 addressPin: $addressPin,
                 selectedSubMemoryID: $selectedSubMemoryID
             )
@@ -599,6 +603,27 @@ struct MemoryRoomView: View {
                     .shadow(color: .black.opacity(0.4), radius: 2, x: 0, y: 1)
             }
 
+            if let weather = memory.weather, weather.hasContent {
+                Button {
+                    if viewModel.isOwner(of: memoryID) {
+                        showWeatherSheet = true
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: weather.symbolName)
+                            .font(.caption2)
+                        Text(weather.chipText)
+                            .font(.caption.weight(.semibold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(.ultraThinMaterial, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 4)
+            }
+
             if !memory.connections.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: -6) {
@@ -737,6 +762,7 @@ struct MemoryMediaSheet: View {
     @Binding var playingVideoURL: URL?
     @Binding var showAddPeopleSheet: Bool
     @Binding var showEditMemorySheet: Bool
+    @Binding var showWeatherSheet: Bool
     @Binding var addressPin: MemoryPin?
     @Binding var selectedSubMemoryID: UUID?
 
@@ -751,6 +777,10 @@ struct MemoryMediaSheet: View {
     @State private var showAddSubMemorySheet: Bool = false
     @State private var subMemoryToEdit: SubMemory?
     @State private var subMemoryToDelete: SubMemory?
+    /// The "+" customize menu, and whichever extras editor it (or a section
+    /// button) opened.
+    @State private var showAddMenu: Bool = false
+    @State private var activeExtraSheet: MemoryExtraSheet?
 
     private var previewPlayer: PreviewPlayerService { .shared }
 
@@ -768,8 +798,16 @@ struct MemoryMediaSheet: View {
     enum MediaSection: String, CaseIterable {
         case photos = "Photos"
         case videos = "Videos"
+        case story = "Story"
         case inside = "Inside"
+        case voice = "Voice"
+        case polls = "Polls"
+        case prompts = "Prompts"
+        case sealed = "Sealed"
+        case keepsakes = "Keepsakes"
+        case collections = "Collections"
         case playlist = "Playlist"
+        case linked = "Linked"
         case comments = "Comments"
         case people = "People"
     }
@@ -777,12 +815,26 @@ struct MemoryMediaSheet: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(memory.title)
-                        .font(.title3.weight(.bold))
-                    Text(memory.date, style: .date)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(memory.title)
+                            .font(.title3.weight(.bold))
+                        Text(memory.date, style: .date)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    Button {
+                        showAddMenu = true
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.title)
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .accessibilityLabel("Add to this memory")
                 }
                 .padding(.horizontal, 20)
 
@@ -835,10 +887,42 @@ struct MemoryMediaSheet: View {
                     photosSection
                 case .videos:
                     videosSection
+                case .story:
+                    StorySection(memoryID: memoryID, viewModel: viewModel) { entry in
+                        activeExtraSheet = .story(entry)
+                    }
                 case .inside:
                     insideSection
+                case .voice:
+                    VoiceNotesSection(memoryID: memoryID, viewModel: viewModel) {
+                        activeExtraSheet = .voice
+                    }
+                case .polls:
+                    PollsSection(memoryID: memoryID, viewModel: viewModel) {
+                        activeExtraSheet = .poll
+                    }
+                case .prompts:
+                    PromptsSection(memoryID: memoryID, viewModel: viewModel) {
+                        activeExtraSheet = .prompt
+                    }
+                case .sealed:
+                    SealedNotesSection(memoryID: memoryID, viewModel: viewModel) {
+                        activeExtraSheet = .sealed
+                    }
+                case .keepsakes:
+                    KeepsakesSection(memoryID: memoryID, viewModel: viewModel) {
+                        activeExtraSheet = .keepsake
+                    }
+                case .collections:
+                    CollectionsSection(memoryID: memoryID, viewModel: viewModel) {
+                        activeExtraSheet = .newCollection
+                    }
                 case .playlist:
                     playlistSection
+                case .linked:
+                    LinkedMemoriesSection(memoryID: memoryID, viewModel: viewModel) {
+                        activeExtraSheet = .linkMemories
+                    }
                 case .comments:
                     commentsSection
                 case .people:
@@ -904,6 +988,37 @@ struct MemoryMediaSheet: View {
         .sheet(isPresented: $showAddSubMemorySheet) {
             SubMemoryEditorSheet(memoryID: memoryID, viewModel: viewModel, existing: nil)
         }
+        .sheet(isPresented: $showAddMenu) {
+            AddToMemorySheet(isOwner: viewModel.isOwner(of: memoryID), onSelect: handleAddAction)
+                .presentationDetents([.medium, .large])
+        }
+        .sheet(item: $activeExtraSheet) { extraSheet in
+            switch extraSheet {
+            case .story(let entry):
+                StoryEditorSheet(memoryID: memoryID, viewModel: viewModel, existing: entry)
+            case .voice:
+                VoiceRecorderSheet(memoryID: memoryID, viewModel: viewModel)
+            case .sealed:
+                SealedNoteSheet(memoryID: memoryID, viewModel: viewModel)
+            case .poll:
+                NewPollSheet(memoryID: memoryID, viewModel: viewModel)
+            case .prompt:
+                NewPromptSheet(memoryID: memoryID, viewModel: viewModel)
+            case .keepsake:
+                KeepsakeSheet(memoryID: memoryID, viewModel: viewModel)
+            case .newCollection:
+                NewCollectionSheet(memoryID: memoryID, viewModel: viewModel)
+            case .linkMemories:
+                LinkMemoriesSheet(memoryID: memoryID, viewModel: viewModel)
+            case .weather:
+                WeatherMoodSheet(memoryID: memoryID, viewModel: viewModel)
+            case .anniversary:
+                AnniversarySheet(memory: memory)
+            }
+        }
+        .sheet(isPresented: $showWeatherSheet) {
+            WeatherMoodSheet(memoryID: memoryID, viewModel: viewModel)
+        }
         .sheet(item: $subMemoryToEdit) { sub in
             SubMemoryEditorSheet(memoryID: memoryID, viewModel: viewModel, existing: sub)
         }
@@ -925,6 +1040,67 @@ struct MemoryMediaSheet: View {
             Button("Cancel", role: .cancel) { subMemoryToDelete = nil }
         } message: {
             Text("Its photos and videos stay in the main memory — only the pin comes off the map.")
+        }
+    }
+
+    /// Routes a "+" menu pick: jumps to the matching section, then opens its
+    /// editor once the menu sheet has finished dismissing (presenting a new
+    /// sheet mid-dismiss gets dropped by SwiftUI).
+    private func handleAddAction(_ action: AddMemoryAction) {
+        showAddMenu = false
+        switch action {
+        case .photos: selectedSection = .photos
+        case .voice: selectedSection = .voice
+        case .story: selectedSection = .story
+        case .keepsake: selectedSection = .keepsakes
+        case .poll: selectedSection = .polls
+        case .prompt: selectedSection = .prompts
+        case .sealed: selectedSection = .sealed
+        case .people: selectedSection = .people
+        case .pinInside: selectedSection = .inside
+        case .collection: selectedSection = .collections
+        case .linkMemory: selectedSection = .linked
+        case .playlist, .song: selectedSection = .playlist
+        case .weather, .anniversary, .editDetails: break
+        }
+
+        Task {
+            try? await Task.sleep(for: .milliseconds(450))
+            switch action {
+            case .photos:
+                showAddPhotosPicker = true
+            case .voice:
+                activeExtraSheet = .voice
+            case .story:
+                let mine = memory.storyEntries.first { viewModel.isAuthor($0.authorID) }
+                activeExtraSheet = .story(mine)
+            case .keepsake:
+                activeExtraSheet = .keepsake
+            case .poll:
+                activeExtraSheet = .poll
+            case .prompt:
+                activeExtraSheet = .prompt
+            case .sealed:
+                activeExtraSheet = .sealed
+            case .people:
+                showAddPeopleSheet = true
+            case .pinInside:
+                showAddSubMemorySheet = true
+            case .collection:
+                activeExtraSheet = .newCollection
+            case .linkMemory:
+                activeExtraSheet = .linkMemories
+            case .playlist:
+                showAddPlaylistSheet = true
+            case .song:
+                showAddSongSheet = true
+            case .weather:
+                activeExtraSheet = .weather
+            case .anniversary:
+                activeExtraSheet = .anniversary
+            case .editDetails:
+                showEditMemorySheet = true
+            }
         }
     }
 
@@ -982,8 +1158,16 @@ struct MemoryMediaSheet: View {
         switch section {
         case .photos: return "photo.fill"
         case .videos: return "video.fill"
+        case .story: return "book.pages"
         case .inside: return "point.3.connected.trianglepath.dotted"
+        case .voice: return "waveform"
+        case .polls: return "chart.bar.fill"
+        case .prompts: return "quote.bubble.fill"
+        case .sealed: return "lock.fill"
+        case .keepsakes: return "ticket.fill"
+        case .collections: return "square.stack.fill"
         case .playlist: return "music.note.list"
+        case .linked: return "link"
         case .comments: return "bubble.left.fill"
         case .people: return "person.2.fill"
         }
@@ -993,10 +1177,18 @@ struct MemoryMediaSheet: View {
         switch section {
         case .photos: return memory.photoURLs.count
         case .videos: return memory.videos.count
+        case .story: return memory.storyEntries.isEmpty ? nil : memory.storyEntries.count
         case .inside: return memory.subMemories.isEmpty ? nil : memory.subMemories.count
+        case .voice: return memory.voiceNotes.isEmpty ? nil : memory.voiceNotes.count
+        case .polls: return memory.polls.isEmpty ? nil : memory.polls.count
+        case .prompts: return memory.prompts.isEmpty ? nil : memory.prompts.count
+        case .sealed: return memory.sealedNotes.isEmpty ? nil : memory.sealedNotes.count
+        case .keepsakes: return memory.keepsakes.isEmpty ? nil : memory.keepsakes.count
+        case .collections: return memory.collections.isEmpty ? nil : memory.collections.count
         case .playlist:
             let count = (memory.playlist != nil ? 1 : 0) + memory.songs.count
             return count > 0 ? count : nil
+        case .linked: return memory.linkedMemoryIDs.isEmpty ? nil : memory.linkedMemoryIDs.count
         case .comments: return memory.comments.count
         case .people: return memory.connections.count
         }

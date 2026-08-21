@@ -208,11 +208,16 @@ struct MemoryPinView: View {
     let memory: Memory
     @State private var isAnimating: Bool = false
 
+    /// The pin's accent color — the owner's custom pick, or the classic orange.
+    private var tint: Color {
+        MemoryPinStyle.color(named: memory.pinStyle?.colorName)
+    }
+
     var body: some View {
         VStack(spacing: 4) {
             ZStack {
                 Circle()
-                    .fill(.white.opacity(0.15))
+                    .fill(tint.opacity(0.25))
                     .frame(width: 44, height: 44)
                     .scaleEffect(isAnimating ? 1.3 : 1.0)
                     .opacity(isAnimating ? 0 : 0.6)
@@ -221,17 +226,31 @@ struct MemoryPinView: View {
                     .fill(.white.opacity(0.3))
                     .frame(width: 32, height: 32)
 
-                Circle()
-                    .fill(
-                        RadialGradient(
-                            colors: [.white, .orange],
-                            center: .center,
-                            startRadius: 0,
-                            endRadius: 12
+                if let emoji = memory.pinStyle?.emoji, !emoji.isEmpty {
+                    ZStack {
+                        Circle()
+                            .fill(.white)
+                            .frame(width: 26, height: 26)
+                            .shadow(color: tint.opacity(0.6), radius: 8, x: 0, y: 0)
+                        Text(emoji)
+                            .font(.system(size: 14))
+                    }
+                    .overlay {
+                        Circle().stroke(tint, lineWidth: 2)
+                    }
+                } else {
+                    Circle()
+                        .fill(
+                            RadialGradient(
+                                colors: [.white, tint],
+                                center: .center,
+                                startRadius: 0,
+                                endRadius: 12
+                            )
                         )
-                    )
-                    .frame(width: 18, height: 18)
-                    .shadow(color: .orange.opacity(0.6), radius: 8, x: 0, y: 0)
+                        .frame(width: 18, height: 18)
+                        .shadow(color: tint.opacity(0.6), radius: 8, x: 0, y: 0)
+                }
             }
 
             Text(memory.title)

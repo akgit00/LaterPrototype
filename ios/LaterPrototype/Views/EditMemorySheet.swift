@@ -21,6 +21,8 @@ struct EditMemorySheet: View {
     @State private var mapThemeRaw: String?
     @State private var customStyleInput: String = ""
     @State private var customStyleError: String?
+    @State private var pinColorName: String
+    @State private var pinEmoji: String?
 
     private var previews: MapThemePreviewStore { .shared }
 
@@ -32,6 +34,8 @@ struct EditMemorySheet: View {
         _subtitle = State(initialValue: memory?.subtitle ?? "")
         _date = State(initialValue: memory?.date ?? Date())
         _mapThemeRaw = State(initialValue: memory?.mapThemeOverrideRaw)
+        _pinColorName = State(initialValue: memory?.pinStyle?.colorName ?? MemoryPinStyle.defaultColorName)
+        _pinEmoji = State(initialValue: memory?.pinStyle?.emoji)
         let center = memory?.centerCoordinate ?? CLLocationCoordinate2D()
         _coordinate = State(initialValue: center)
         _mapPosition = State(initialValue: .region(MKCoordinateRegion(
@@ -153,6 +157,10 @@ struct EditMemorySheet: View {
                         }
                     }
 
+                    fieldSection(header: "Pin appearance") {
+                        pinAppearanceSection
+                    }
+
                     if MapboxSetup.hasToken {
                         fieldSection(header: "Map style") {
                             mapStyleSection
@@ -179,6 +187,84 @@ struct EditMemorySheet: View {
             .task { await previews.generateAll() }
             .sensoryFeedback(.selection, trigger: mapThemeRaw)
         }
+    }
+
+    // MARK: - Pin appearance
+
+    /// Customizes how this memory's pin looks on the Explore globe: an accent
+    /// color plus an optional emoji in place of the glowing dot.
+    private var pinAppearanceSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(MemoryPinStyle.colorNames, id: \.self) { name in
+                        Button {
+                            pinColorName = name
+                        } label: {
+                            Circle()
+                                .fill(MemoryPinStyle.color(named: name).gradient)
+                                .frame(width: 32, height: 32)
+                                .overlay {
+                                    if pinColorName == name {
+                                        Image(systemName: "checkmark")
+                                            .font(.caption.weight(.bold))
+                                            .foregroundStyle(.white)
+                                    }
+                                }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    Button {
+                        pinEmoji = nil
+                    } label: {
+                        Text("None")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .padding(.horizontal, 12)
+                            .frame(height: 38)
+                            .background(
+                                pinEmoji == nil ? Color.accentColor.opacity(0.18) : Color(.tertiarySystemFill),
+                                in: Capsule()
+                            )
+                            .overlay {
+                                Capsule().strokeBorder(pinEmoji == nil ? Color.accentColor : .clear, lineWidth: 1.5)
+                            }
+                    }
+                    .buttonStyle(.plain)
+
+                    ForEach(MemoryPinStyle.emojiOptions, id: \.self) { emoji in
+                        Button {
+                            pinEmoji = emoji
+                        } label: {
+                            Text(emoji)
+                                .font(.system(size: 20))
+                                .frame(width: 38, height: 38)
+                                .background(
+                                    pinEmoji == emoji ? Color.accentColor.opacity(0.18) : Color(.tertiarySystemFill),
+                                    in: Circle()
+                                )
+                                .overlay {
+                                    Circle().strokeBorder(pinEmoji == emoji ? Color.accentColor : .clear, lineWidth: 1.5)
+                                }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+
+            Text("Changes how this memory's pin looks on the Explore globe.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
     }
 
     // MARK: - Map style picker
@@ -394,6 +480,10 @@ struct EditMemorySheet: View {
             coordinate: coordinate,
             mapTheme: mapThemeRaw
         )
+        let style: MemoryPinStyle? = (pinEmoji == nil && pinColorName == MemoryPinStyle.defaultColorName)
+            ? nil
+            : MemoryPinStyle(emoji: pinEmoji, colorName: pinColorName)
+        viewModel.setPinStyle(for: memoryID, style: style)
         dismiss()
     }
 }

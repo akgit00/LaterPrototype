@@ -320,6 +320,27 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
     /// an unrecognized value) means the memory follows the app-wide theme the
     /// user picked in Settings, matching the Explore globe.
     var mapTheme: String?
+    /// Long-form written versions of what happened, one per person. Synced
+    /// through the shared extras table so everyone can contribute.
+    var storyEntries: [StoryEntry]
+    /// Audio recordings attached to the memory (shared extras).
+    var voiceNotes: [VoiceNote]
+    /// Notes locked until a future date (shared extras).
+    var sealedNotes: [SealedNote]
+    /// Group polls (shared extras).
+    var polls: [MemoryPoll]
+    /// Question cards everyone can answer (shared extras).
+    var prompts: [MemoryPrompt]
+    /// Tickets, receipts, and other mementos (shared extras).
+    var keepsakes: [Keepsake]
+    /// Named photo sub-albums, curated by the owner (payload).
+    var collections: [MemoryCollection]
+    /// Other memories connected to this one, curated by the owner (payload).
+    var linkedMemoryIDs: [UUID]
+    /// That day's weather + mood chip for the header (payload, owner-set).
+    var weather: WeatherSnapshot?
+    /// Custom look for this memory's pin on the globe (payload, owner-set).
+    var pinStyle: MemoryPinStyle?
 
     init(
         id: UUID = UUID(),
@@ -341,7 +362,17 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
         subMemories: [SubMemory] = [],
         allowsGuestInvites: Bool = false,
         allowsMediaSaving: Bool = true,
-        mapTheme: String? = nil
+        mapTheme: String? = nil,
+        storyEntries: [StoryEntry] = [],
+        voiceNotes: [VoiceNote] = [],
+        sealedNotes: [SealedNote] = [],
+        polls: [MemoryPoll] = [],
+        prompts: [MemoryPrompt] = [],
+        keepsakes: [Keepsake] = [],
+        collections: [MemoryCollection] = [],
+        linkedMemoryIDs: [UUID] = [],
+        weather: WeatherSnapshot? = nil,
+        pinStyle: MemoryPinStyle? = nil
     ) {
         self.id = id
         self.title = title
@@ -363,6 +394,16 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
         self.allowsGuestInvites = allowsGuestInvites
         self.allowsMediaSaving = allowsMediaSaving
         self.mapTheme = mapTheme
+        self.storyEntries = storyEntries
+        self.voiceNotes = voiceNotes
+        self.sealedNotes = sealedNotes
+        self.polls = polls
+        self.prompts = prompts
+        self.keepsakes = keepsakes
+        self.collections = collections
+        self.linkedMemoryIDs = linkedMemoryIDs
+        self.weather = weather
+        self.pinStyle = pinStyle
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -372,6 +413,8 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
         case subMemories
         case allowsGuestInvites, allowsMediaSaving
         case mapTheme
+        case storyEntries, voiceNotes, sealedNotes, polls, prompts, keepsakes
+        case collections, linkedMemoryIDs, weather, pinStyle
     }
 
     nonisolated static func == (lhs: Memory, rhs: Memory) -> Bool {
@@ -395,6 +438,16 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
             && lhs.allowsGuestInvites == rhs.allowsGuestInvites
             && lhs.allowsMediaSaving == rhs.allowsMediaSaving
             && lhs.mapTheme == rhs.mapTheme
+            && lhs.storyEntries == rhs.storyEntries
+            && lhs.voiceNotes == rhs.voiceNotes
+            && lhs.sealedNotes == rhs.sealedNotes
+            && lhs.polls == rhs.polls
+            && lhs.prompts == rhs.prompts
+            && lhs.keepsakes == rhs.keepsakes
+            && lhs.collections == rhs.collections
+            && lhs.linkedMemoryIDs == rhs.linkedMemoryIDs
+            && lhs.weather == rhs.weather
+            && lhs.pinStyle == rhs.pinStyle
     }
 
     nonisolated init(from decoder: Decoder) throws {
@@ -421,6 +474,16 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
         allowsGuestInvites = try container.decodeIfPresent(Bool.self, forKey: .allowsGuestInvites) ?? false
         allowsMediaSaving = try container.decodeIfPresent(Bool.self, forKey: .allowsMediaSaving) ?? true
         mapTheme = try container.decodeIfPresent(String.self, forKey: .mapTheme)
+        storyEntries = try container.decodeIfPresent([StoryEntry].self, forKey: .storyEntries) ?? []
+        voiceNotes = try container.decodeIfPresent([VoiceNote].self, forKey: .voiceNotes) ?? []
+        sealedNotes = try container.decodeIfPresent([SealedNote].self, forKey: .sealedNotes) ?? []
+        polls = try container.decodeIfPresent([MemoryPoll].self, forKey: .polls) ?? []
+        prompts = try container.decodeIfPresent([MemoryPrompt].self, forKey: .prompts) ?? []
+        keepsakes = try container.decodeIfPresent([Keepsake].self, forKey: .keepsakes) ?? []
+        collections = try container.decodeIfPresent([MemoryCollection].self, forKey: .collections) ?? []
+        linkedMemoryIDs = try container.decodeIfPresent([UUID].self, forKey: .linkedMemoryIDs) ?? []
+        weather = try container.decodeIfPresent(WeatherSnapshot.self, forKey: .weather)
+        pinStyle = try container.decodeIfPresent(MemoryPinStyle.self, forKey: .pinStyle)
     }
 
     nonisolated func encode(to encoder: Encoder) throws {
@@ -446,5 +509,15 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
         try container.encode(allowsGuestInvites, forKey: .allowsGuestInvites)
         try container.encode(allowsMediaSaving, forKey: .allowsMediaSaving)
         try container.encodeIfPresent(mapTheme, forKey: .mapTheme)
+        try container.encode(storyEntries, forKey: .storyEntries)
+        try container.encode(voiceNotes, forKey: .voiceNotes)
+        try container.encode(sealedNotes, forKey: .sealedNotes)
+        try container.encode(polls, forKey: .polls)
+        try container.encode(prompts, forKey: .prompts)
+        try container.encode(keepsakes, forKey: .keepsakes)
+        try container.encode(collections, forKey: .collections)
+        try container.encode(linkedMemoryIDs, forKey: .linkedMemoryIDs)
+        try container.encodeIfPresent(weather, forKey: .weather)
+        try container.encodeIfPresent(pinStyle, forKey: .pinStyle)
     }
 }
