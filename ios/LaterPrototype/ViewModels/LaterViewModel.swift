@@ -22,6 +22,10 @@ final class LaterViewModel {
     /// per-conversation last-read timestamp stored locally on this device.
     var unreadByFriend: [UUID: Int] = [:]
 
+    /// The newest message exchanged with each friend (by connection id),
+    /// driving the conversation previews on the Messages tab.
+    var conversationPreviews: [UUID: ConversationPreview] = [:]
+
     /// The friend whose chat is currently open on screen. Their messages are
     /// never counted as unread, so opening a conversation reliably clears its
     /// notification badge.
@@ -1306,6 +1310,14 @@ final class LaterViewModel {
         let readAt: Date?
     }
 
+    /// The latest message exchanged with a friend, shown as the row preview
+    /// in the Messages tab conversation list.
+    struct ConversationPreview {
+        let body: String
+        let date: Date
+        let isMine: Bool
+    }
+
     /// Loads the conversation between the signed-in user and a connection,
     /// oldest message first.
     @MainActor
@@ -1382,24 +1394,35 @@ final class LaterViewModel {
     }
 
     /// Recomputes how many messages from each friend have arrived since the last
-    /// time the signed-in user opened that conversation on this device.
+    /// time the signed-in user opened that conversation on this device, and
+    /// refreshes the latest-message previews for the Messages tab — both from
+    /// a single fetch.
     @MainActor
     func loadUnreadCounts() async {
         guard let userID = currentUserID, SupabaseREST.hasSession else { return }
         do {
-            let rows = try await MessageService.received(currentUserID: userID)
+            let rows = try await MessageService.recent(currentUserID: userID)
             var counts: [UUID: Int] = [:]
+            var previews: [UUID: ConversationPreview] = [:]
             for row in rows {
-                guard let senderUUID = UUID(uuidString: row.sender_id) else { continue }
+                let mine = row.isMine(currentUserID: userID)
+                guard let friendUUID = UUID(uuidString: mine ? row.recipient_id : row.sender_id) else { continue }
+                // Rows arrive newest first, so the first row per friend wins.
+                if previews[friendUUID] == nil {
+                    previews[friendUUID] = ConversationPreview(body: row.body, date: row.created_at, isMine: mine)
+                }
+                // Only received messages can be unread.
+                guard !mine else { continue }
                 // A conversation that's open on screen is read by definition.
-                if senderUUID == activeChatFriendID { continue }
+                if friendUUID == activeChatFriendID { continue }
                 // Cross-device: anything stamped read in the cloud stays read.
                 if row.read_at != nil { continue }
-                if row.created_at > lastRead(for: senderUUID) {
-                    counts[senderUUID, default: 0] += 1
+                if row.created_at > lastRead(for: friendUUID) {
+                    counts[friendUUID, default: 0] += 1
                 }
             }
             unreadByFriend = counts
+            conversationPreviews = previews
         } catch {
             // Non-fatal: leave the previous counts in place on a transient failure.
         }

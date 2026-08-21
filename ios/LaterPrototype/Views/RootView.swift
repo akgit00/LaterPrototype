@@ -15,6 +15,10 @@ struct RootView: View {
         }
         .animation(.easeInOut(duration: 0.35), value: auth.user?.id)
         .animation(.easeInOut(duration: 0.35), value: auth.isLoading)
+        .onAppear {
+            // Restore the theme picked in Settings (System / Light / Dark).
+            AppearancePreference.applyStored()
+        }
     }
 
     private var loadingView: some View {

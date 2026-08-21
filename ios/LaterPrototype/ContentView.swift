@@ -25,14 +25,20 @@ struct ContentView: View {
                 UserSearchView(viewModel: viewModel)
             }
 
-            Tab("Capsules", systemImage: "envelope.badge.shield.half.filled", value: 2) {
+            Tab("Messages", systemImage: "message", value: 2) {
+                MessagesView(viewModel: viewModel) {
+                    selectedTab = 1
+                }
+            }
+            .badge(viewModel.totalUnread)
+
+            Tab("Capsules", systemImage: "envelope.badge.shield.half.filled", value: 3) {
                 TimeCapsuleView(viewModel: viewModel)
             }
 
-            Tab("Profile", systemImage: "person.crop.circle", value: 3) {
+            Tab("Profile", systemImage: "person.crop.circle", value: 4) {
                 ProfileView(viewModel: viewModel)
             }
-            .badge(viewModel.totalUnread)
         }
         .tint(.blue)
         .task(id: auth.user?.id) {
@@ -104,7 +110,7 @@ struct ContentView: View {
             routedChatFriend = nil
             routedMemoryID = nil
             router.showCapsuleHistory = true
-            selectedTab = 2
+            selectedTab = 3
             return
         }
 
@@ -129,7 +135,7 @@ struct ContentView: View {
         // a cold start still gets a chance to resolve the real target.
         if hasCompletedInitialSync {
             router.pendingThreadID = nil
-            selectedTab = 3
+            selectedTab = 4
         }
     }
 }

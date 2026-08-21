@@ -81,17 +81,19 @@ nonisolated enum MessageService {
         )
     }
 
-    /// Fetches every message the signed-in user has received, newest first.
-    /// Used to compute per-conversation unread badges. RLS already restricts
-    /// rows to ones involving the user.
-    static func received(currentUserID: String) async throws -> [MessageRow] {
+    /// Fetches the most recent messages involving the signed-in user in either
+    /// direction, newest first. RLS already restricts rows to the user's own
+    /// conversations. One fetch drives both the unread badges and the
+    /// conversation previews on the Messages tab.
+    static func recent(currentUserID: String) async throws -> [MessageRow] {
         let data = try await SupabaseREST.request(
             path: "messages",
             method: "GET",
             query: [
                 URLQueryItem(name: "select", value: "*"),
-                URLQueryItem(name: "recipient_id", value: "eq.\(currentUserID)"),
+                URLQueryItem(name: "or", value: "(sender_id.eq.\(currentUserID),recipient_id.eq.\(currentUserID))"),
                 URLQueryItem(name: "order", value: "created_at.desc"),
+                URLQueryItem(name: "limit", value: "500"),
             ]
         )
         return try SupabaseREST.makeDecoder().decode([MessageRow].self, from: data)

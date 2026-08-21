@@ -7,7 +7,7 @@ struct ProfileView: View {
     @Environment(AuthManager.self) private var auth
     @Environment(ProfileManager.self) private var profile
     @State private var selectedSegment: ProfileSegment = .timeline
-    @State private var showSignOutConfirm = false
+    @State private var showSettings = false
     @State private var showEditProfile = false
     @State private var showAddConnection = false
     @State private var selectedMemoryID: UUID?
@@ -109,7 +109,6 @@ struct ProfileView: View {
     }
 
     var body: some View {
-        @Bindable var bindableViewModel = viewModel
         NavigationStack {
             ScrollView {
                 VStack(spacing: 0) {
@@ -161,31 +160,15 @@ struct ProfileView: View {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button {
-                            showEditProfile = true
-                        } label: {
-                            Label("Edit Profile", systemImage: "pencil")
-                        }
-                        Toggle(isOn: $bindableViewModel.readReceiptsEnabled) {
-                            Label("Send Read Receipts", systemImage: "checkmark.message")
-                        }
-                        Button(role: .destructive) {
-                            showSignOutConfirm = true
-                        } label: {
-                            Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right")
-                        }
+                    Button {
+                        showSettings = true
                     } label: {
-                        Image(systemName: "ellipsis.circle")
+                        Image(systemName: "gearshape")
                     }
                 }
             }
-            .confirmationDialog("Sign out of Later?", isPresented: $showSignOutConfirm, titleVisibility: .visible) {
-                Button("Sign out", role: .destructive) {
-                    profile.clear()
-                    Task { await auth.signOut() }
-                }
-                Button("Cancel", role: .cancel) { }
+            .sheet(isPresented: $showSettings) {
+                SettingsView(viewModel: viewModel)
             }
             .sheet(isPresented: $showAddConnection) {
                 AddConnectionView(viewModel: viewModel)
