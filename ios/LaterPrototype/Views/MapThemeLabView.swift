@@ -42,6 +42,10 @@ struct MapThemeLabView: View {
     @State private var selectedCity: LabCity = .newYork
     @State private var customInput: String = ""
     @State private var customError: String?
+    @State private var showSavePrompt = false
+    @State private var saveNameInput = ""
+    @State private var renamingStyleRaw: String?
+    @State private var renameInput = ""
 
     private var previews: MapThemePreviewStore { .shared }
 
@@ -85,6 +89,29 @@ struct MapThemeLabView: View {
             withViewportAnimation(.fly) {
                 heroViewport = Self.viewport(for: newCity)
             }
+        }
+        .sensoryFeedback(.impact(weight: .medium), trigger: profile.savedMapStyles.count)
+        .alert("Save this style", isPresented: $showSavePrompt) {
+            TextField("Style name", text: $saveNameInput)
+            Button("Save") {
+                profile.saveStyle(raw: storedThemeRaw, name: saveNameInput)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("It'll be one tap away under Your saved styles, on every device you sign in to.")
+        }
+        .alert("Rename style", isPresented: Binding(
+            get: { renamingStyleRaw != nil },
+            set: { if !$0 { renamingStyleRaw = nil } }
+        )) {
+            TextField("Style name", text: $renameInput)
+            Button("Save") {
+                if let raw = renamingStyleRaw {
+                    profile.saveStyle(raw: raw, name: renameInput)
+                }
+                renamingStyleRaw = nil
+            }
+            Button("Cancel", role: .cancel) { renamingStyleRaw = nil }
         }
     }
 
@@ -265,6 +292,23 @@ struct MapThemeLabView: View {
                     activeCustomCard
                 }
 
+                if !profile.savedMapStyles.isEmpty {
+                    Text("Your saved styles — tap to apply, hold to rename or remove:")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 10) {
+                            ForEach(profile.savedMapStyles) { style in
+                                savedStyleCard(style)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+
+                    Divider()
+                }
+
                 Text("Designer styles from the Mapbox gallery — tap to try one:")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -280,12 +324,12 @@ struct MapThemeLabView: View {
 
                 Divider()
 
-                Text("Or paste any public style URL — from the gallery or one you designed in Mapbox Studio (Share → copy Style URL).")
+                Text("Or paste a gallery link exactly as shared — like mapbox.com/gallery#community-mineral — type a style name like “Pencil”, or paste any public style URL from Mapbox Studio (Share → copy Style URL).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
                 HStack(spacing: 8) {
-                    TextField("mapbox://styles/username/styleid", text: $customInput)
+                    TextField("Gallery link, style name, or style URL", text: $customInput)
                         .textFieldStyle(.roundedBorder)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -359,8 +403,8 @@ struct MapThemeLabView: View {
         .animation(.spring(duration: 0.25), value: isSelected)
     }
 
-    /// Shown while a pasted community style is live, with a way back to the
-    /// built-in default.
+    /// Shown while a pasted community style is live, with a bookmark to keep
+    /// it in the saved collection and a way back to the built-in default.
     private var activeCustomCard: some View {
         HStack(spacing: 10) {
             Image(systemName: "checkmark.circle.fill")
@@ -379,6 +423,19 @@ struct MapThemeLabView: View {
 
             Spacer()
 
+            Button {
+                toggleSaveForActiveStyle()
+            } label: {
+                Label(
+                    profile.isStyleSaved(storedThemeRaw) ? "Saved" : "Save",
+                    systemImage: profile.isStyleSaved(storedThemeRaw) ? "bookmark.fill" : "bookmark"
+                )
+            }
+            .font(.caption.weight(.semibold))
+            .buttonStyle(.bordered)
+            .tint(Color.accentColor)
+            .accessibilityLabel(profile.isStyleSaved(storedThemeRaw) ? "Remove from saved styles" : "Save this style")
+
             Button("Remove") {
                 select(MapThemeOption.defaultTheme.rawValue)
             }
@@ -393,6 +450,71 @@ struct MapThemeLabView: View {
         }
     }
 
+    /// One-tap card for a style the user bookmarked from a pasted link.
+    private func savedStyleCard(_ style: SavedMapStyle) -> some View {
+        let isSelected = storedThemeRaw == style.raw
+        return Button {
+            select(style.raw)
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Image(systemName: "bookmark.fill")
+                        .font(.footnote)
+                        .foregroundStyle(Color.accentColor)
+                    Spacer()
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.body)
+                            .foregroundStyle(Color.accentColor)
+                            .transition(.scale.combined(with: .opacity))
+                    }
+                }
+                Text(style.name)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(MapThemeSelection.detail(forRaw: style.raw))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.leading)
+                    .lineLimit(2, reservesSpace: true)
+            }
+            .padding(10)
+            .frame(width: 140, alignment: .leading)
+            .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 12))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(isSelected ? Color.accentColor : .clear, lineWidth: 1.5)
+            }
+        }
+        .buttonStyle(.plain)
+        .animation(.spring(duration: 0.25), value: isSelected)
+        .contextMenu {
+            Button {
+                renameInput = style.name
+                renamingStyleRaw = style.raw
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+            Button(role: .destructive) {
+                profile.removeSavedStyle(raw: style.raw)
+            } label: {
+                Label("Remove from saved", systemImage: "bookmark.slash")
+            }
+        }
+    }
+
+    /// Bookmarks the active custom style (asking for a name first) or drops
+    /// it from the collection when it's already saved.
+    private func toggleSaveForActiveStyle() {
+        if profile.isStyleSaved(storedThemeRaw) {
+            profile.removeSavedStyle(raw: storedThemeRaw)
+        } else {
+            saveNameInput = MapThemeSelection.suggestedSaveName(forRaw: storedThemeRaw)
+            showSavePrompt = true
+        }
+    }
+
     /// Applies a theme everywhere and saves it to the user's cloud profile so
     /// the pick survives reinstalls and follows their account.
     private func select(_ raw: String) {
@@ -402,7 +524,11 @@ struct MapThemeLabView: View {
 
     private func applyCustomStyle() {
         guard let raw = MapThemeSelection.normalizeCustomInput(customInput) else {
-            customError = "That doesn't look like a Mapbox style URL. In Mapbox Studio, use Share and copy the Style URL."
+            if MapThemeSelection.isGalleryLink(customInput) {
+                customError = "Couldn't match that gallery link to a style. Tap the style in the gallery first so the link ends in #community-…, or copy its Style URL instead."
+            } else {
+                customError = "That doesn't look like a Mapbox style. Paste a gallery link, a style name, or a Style URL from Mapbox Studio."
+            }
             return
         }
         customError = nil

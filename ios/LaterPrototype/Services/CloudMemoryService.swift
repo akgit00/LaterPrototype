@@ -173,6 +173,41 @@ nonisolated enum CloudMemoryService {
         )
     }
 
+    /// Reads the user's bookmarked community map styles from their profile
+    /// row. Any failure (including a database that doesn't have the column
+    /// yet) returns nil so the caller keeps local state.
+    static func fetchSavedMapStyles(userID: String) async -> [SavedMapStyle]? {
+        struct StylesRow: Codable {
+            let saved_map_styles: [SavedMapStyle]?
+        }
+        guard let data = try? await SupabaseREST.request(
+            path: "profiles",
+            method: "GET",
+            query: [
+                URLQueryItem(name: "id", value: "eq.\(userID)"),
+                URLQueryItem(name: "select", value: "saved_map_styles"),
+                URLQueryItem(name: "limit", value: "1"),
+            ]
+        ) else { return nil }
+        return (try? SupabaseREST.makeDecoder().decode([StylesRow].self, from: data))?.first?.saved_map_styles
+    }
+
+    /// Saves the user's bookmarked community styles on their profile row so
+    /// the collection survives reinstalls and follows their account.
+    static func updateSavedMapStyles(userID: String, styles: [SavedMapStyle]) async {
+        struct StylesUpdate: Encodable {
+            let saved_map_styles: [SavedMapStyle]
+        }
+        guard let body = try? SupabaseREST.makeEncoder().encode(StylesUpdate(saved_map_styles: styles)) else { return }
+        try? await SupabaseREST.request(
+            path: "profiles",
+            method: "PATCH",
+            query: [URLQueryItem(name: "id", value: "eq.\(userID)")],
+            body: body,
+            prefer: "return=minimal"
+        )
+    }
+
     /// Uploads a locally-stored avatar image to Storage and returns its public
     /// URL. Returns nil for non-local or already-remote URLs.
     static func uploadAvatar(_ urlString: String, userID: String) async -> String? {

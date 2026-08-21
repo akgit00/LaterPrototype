@@ -10,18 +10,26 @@ class ProfileManager {
     /// Holds either a local file URL (just-picked, pending upload) or, once
     /// synced, the remote Storage URL of the avatar.
     var avatarLocalURL: String?
+    /// Community map styles the user bookmarked from pasted links, shown as
+    /// one-tap cards in every style picker.
+    var savedMapStyles: [SavedMapStyle] = []
 
     private var userID: String?
 
     private let nameKey = "profile_displayName"
     private let bioKey = "profile_bio"
     private let avatarKey = "profile_avatarURL"
+    private let savedStylesKey = "profile_savedMapStyles"
 
     init() {
         let defaults = UserDefaults.standard
         displayNameOverride = defaults.string(forKey: nameKey)
         bioOverride = defaults.string(forKey: bioKey)
         avatarLocalURL = defaults.string(forKey: avatarKey)
+        if let data = defaults.data(forKey: savedStylesKey),
+           let styles = try? JSONDecoder().decode([SavedMapStyle].self, from: data) {
+            savedMapStyles = styles
+        }
     }
 
     /// Loads the signed-in user's saved profile from Supabase so customizations
@@ -33,6 +41,14 @@ class ProfileManager {
         // either side never blocks the other.
         if let theme = await CloudMemoryService.fetchMapTheme(userID: userID), !theme.isEmpty {
             UserDefaults.standard.set(theme, forKey: MapThemeOption.storageKey)
+        }
+
+        // Restore bookmarked community styles the same way, merging so styles
+        // saved on this device before the first sync are never lost.
+        if let cloudStyles = await CloudMemoryService.fetchSavedMapStyles(userID: userID), !cloudStyles.isEmpty {
+            mergeSavedStyles(cloud: cloudStyles)
+        } else if !savedMapStyles.isEmpty {
+            syncSavedStylesToCloud()
         }
 
         guard let cloud = (try? await CloudMemoryService.fetchProfile(id: userID)) ?? nil else { return }
@@ -48,6 +64,63 @@ class ProfileManager {
         UserDefaults.standard.set(raw, forKey: MapThemeOption.storageKey)
         guard let userID else { return }
         Task { await CloudMemoryService.updateMapTheme(userID: userID, raw: raw) }
+    }
+
+    /// True when the style is already in the user's saved collection.
+    func isStyleSaved(_ raw: String) -> Bool {
+        savedMapStyles.contains { $0.raw == raw }
+    }
+
+    /// Bookmarks a community style (or renames an existing bookmark) and
+    /// syncs the collection to the user's cloud profile.
+    func saveStyle(raw: String, name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalName = trimmed.isEmpty ? MapThemeSelection.suggestedSaveName(forRaw: raw) : trimmed
+        if let index = savedMapStyles.firstIndex(where: { $0.raw == raw }) {
+            savedMapStyles[index].name = finalName
+        } else {
+            savedMapStyles.append(SavedMapStyle(name: finalName, raw: raw))
+        }
+        persistAndSyncSavedStyles()
+    }
+
+    /// Drops a style from the saved collection. The style itself keeps
+    /// working anywhere it's still applied.
+    func removeSavedStyle(raw: String) {
+        savedMapStyles.removeAll { $0.raw == raw }
+        persistAndSyncSavedStyles()
+    }
+
+    /// Cloud copy wins on order; anything saved locally but missing from the
+    /// cloud is appended and pushed back up.
+    private func mergeSavedStyles(cloud: [SavedMapStyle]) {
+        var merged = cloud
+        for style in savedMapStyles where !merged.contains(where: { $0.raw == style.raw }) {
+            merged.append(style)
+        }
+        let cloudNeedsUpdate = merged != cloud
+        savedMapStyles = merged
+        persistSavedStyles()
+        if cloudNeedsUpdate { syncSavedStylesToCloud() }
+    }
+
+    private func persistAndSyncSavedStyles() {
+        persistSavedStyles()
+        syncSavedStylesToCloud()
+    }
+
+    private func persistSavedStyles() {
+        if let data = try? JSONEncoder().encode(savedMapStyles) {
+            UserDefaults.standard.set(data, forKey: savedStylesKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: savedStylesKey)
+        }
+    }
+
+    private func syncSavedStylesToCloud() {
+        guard let userID else { return }
+        let styles = savedMapStyles
+        Task { await CloudMemoryService.updateSavedMapStyles(userID: userID, styles: styles) }
     }
 
     /// Applies edited values, treating empty input as "use the default", then
@@ -102,6 +175,8 @@ class ProfileManager {
         displayNameOverride = nil
         bioOverride = nil
         avatarLocalURL = nil
+        savedMapStyles = []
+        UserDefaults.standard.removeObject(forKey: savedStylesKey)
         persist()
     }
 

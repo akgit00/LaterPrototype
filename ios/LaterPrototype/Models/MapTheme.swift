@@ -104,6 +104,104 @@ enum MapThemeOption: String, CaseIterable, Identifiable {
     }
 }
 
+/// Every style in the public Mapbox gallery (mapbox.com/gallery), keyed by
+/// the anchor slug its share link uses — `…/gallery#community-mineral` maps
+/// to the Mineral style. Extracted from the gallery's own card data; every
+/// entry is owned by a Mapbox account, so they render with any access token.
+enum MapboxGalleryCatalog {
+    struct Entry {
+        let name: String
+        let raw: String
+    }
+
+    /// Looks up a gallery anchor slug ("community-mineral") or a bare style
+    /// name typed by hand ("mineral", "neon glow", "Lè Shine").
+    static func entry(forSlug input: String) -> Entry? {
+        let slug = slugify(input)
+        guard !slug.isEmpty else { return nil }
+        if let exact = bySlug[slug] { return exact }
+        if let community = bySlug["community-\(slug)"] { return community }
+        return bySlug["mapbox-\(slug)"]
+    }
+
+    /// The gallery entry matching a stored style URL, used for labels.
+    static func entry(forRaw raw: String) -> Entry? {
+        byRaw[raw]
+    }
+
+    /// Lowercased, diacritic-folded, hyphen-separated form of a name:
+    /// "Lè Shine" → "le-shine", "NASA's Black Marble" → "nasas-black-marble".
+    private static func slugify(_ value: String) -> String {
+        let folded = value.folding(
+            options: [.diacriticInsensitive, .caseInsensitive],
+            locale: Locale(identifier: "en_US")
+        )
+        var out = ""
+        var lastWasHyphen = true
+        for ch in folded {
+            if ch.isLetter || ch.isNumber {
+                out.append(ch)
+                lastWasHyphen = false
+            } else if ch == "'" || ch == "’" {
+                continue
+            } else if !lastWasHyphen {
+                out.append("-")
+                lastWasHyphen = true
+            }
+        }
+        while out.hasSuffix("-") { out.removeLast() }
+        return out
+    }
+
+    private static let byRaw: [String: Entry] = Dictionary(
+        bySlug.values.map { ($0.raw, $0) },
+        uniquingKeysWith: { first, _ in first }
+    )
+
+    private static let bySlug: [String: Entry] = [
+        "community-american-memory": Entry(name: "American Memory", raw: "mapbox://styles/mapbox-map-design/cl4orrp5e000p14ldwenm7xsf"),
+        "community-basic": Entry(name: "Basic", raw: "mapbox://styles/mapbox-map-design/cl4whef7m000714pc44f3qaxs"),
+        "community-basic-overcast": Entry(name: "Basic Overcast", raw: "mapbox://styles/mapbox-map-design/cl4whev1w002w16s9mgoliotw"),
+        "community-blueprint": Entry(name: "Blueprint", raw: "mapbox://styles/mapbox-map-design/cks97e1e37nsd17nzg7p0308g"),
+        "community-bubble": Entry(name: "Bubble", raw: "mapbox://styles/mapbox-map-design/cl4wxue5j000c14r17uqrjpqb"),
+        "community-cali-terrain": Entry(name: "Cali Terrain", raw: "mapbox://styles/mapbox/cjerxnqt3cgvp2rmyuxbeqme7"),
+        "community-dark": Entry(name: "Dark", raw: "mapbox://styles/mapbox/dark-v10"),
+        "community-decimal": Entry(name: "Decimal", raw: "mapbox://styles/mapbox-map-design/ck4014y110wt61ctt07egsel6"),
+        "community-finland-topo": Entry(name: "Finland Topo", raw: "mapbox://styles/mapbox-map-design/cmd3ga8yb065i01sh1oho4h1r"),
+        "community-frank": Entry(name: "Frank", raw: "mapbox://styles/mapbox-map-design/ckshxkppe0gge18nz20i0nrwq"),
+        "community-ice-cream": Entry(name: "Ice Cream", raw: "mapbox://styles/mapbox/cj7t3i5yj0unt2rmt3y4b5e32"),
+        "community-le-shine": Entry(name: "Lè Shine", raw: "mapbox://styles/mapbox/cjcunv5ae262f2sm9tfwg8i0w"),
+        "community-light": Entry(name: "Light", raw: "mapbox://styles/mapbox/light-v10"),
+        "community-mapbox-streets-japan": Entry(name: "Mapbox Streets Japan", raw: "mapbox://styles/mapbox-map-design/ckt20wgoy1awp17ms7pyygigf"),
+        "community-mineral": Entry(name: "Mineral", raw: "mapbox://styles/mapbox/cjtep62gq54l21frr1whf27ak"),
+        "community-minimo": Entry(name: "Minimo", raw: "mapbox://styles/mapbox-map-design/cksjc2nsq1bg117pnekb655h1"),
+        "community-moonlight": Entry(name: "Moonlight", raw: "mapbox://styles/mapbox/cj3kbeqzo00022smj7akz3o1e"),
+        "community-nasas-black-marble": Entry(name: "NASA's Black Marble", raw: "mapbox://styles/mapbox-map-design/cl4fnpof7000i15p8jvz3aw2r"),
+        "community-navigation-guidance-day": Entry(name: "Navigation Guidance Day", raw: "mapbox://styles/mapbox/navigation-guidance-day-v4"),
+        "community-navigation-guidance-night": Entry(name: "Navigation Guidance Night", raw: "mapbox://styles/mapbox/navigation-guidance-night-v4"),
+        "community-neon-glow": Entry(name: "Neon Glow", raw: "mapbox://styles/mapbox-map-design/cl4gxqwi5001415l381n7qwak"),
+        "community-north-star": Entry(name: "North Star", raw: "mapbox://styles/mapbox/cj44mfrt20f082snokim4ungi"),
+        "community-outdoors": Entry(name: "Outdoors", raw: "mapbox://styles/mapbox/outdoors-v12"),
+        "community-pencil": Entry(name: "Pencil", raw: "mapbox://styles/mapbox-map-design/cks9iema71es417mlrft4go2k"),
+        "community-satellite": Entry(name: "Legacy Satellite", raw: "mapbox://styles/mapbox/satellite-v9"),
+        "community-satellite-streets": Entry(name: "Satellite Streets", raw: "mapbox://styles/mapbox/satellite-streets-v12"),
+        "community-standard-oil-company": Entry(name: "Standard Oil Company", raw: "mapbox://styles/mapbox-map-design/ckr0svm3922ki18qntevm857n"),
+        "community-streets": Entry(name: "Streets", raw: "mapbox://styles/mapbox/streets-v12"),
+        "community-unicorn": Entry(name: "Unicorn", raw: "mapbox://styles/mapbox-map-design/cl4fotjdi000l15p8cqc6nuts"),
+        "community-water-world": Entry(name: "Water World", raw: "mapbox://styles/mapbox-map-design/cl4bxa84b000l15kg4a2q8zsr"),
+        "mapbox-cool": Entry(name: "Cool", raw: "mapbox://styles/mapbox-map-design/cmclxnhzb008001sb6g3m49ko"),
+        "mapbox-dark-2d": Entry(name: "Dark 2D", raw: "mapbox://styles/mapbox-map-design/cmf04nwfx00at01ple6dhenx3"),
+        "mapbox-default": Entry(name: "Default", raw: "mapbox://styles/mapbox-map-design/cmcz3qlqr005j01qm3il69x43"),
+        "mapbox-faded": Entry(name: "Faded", raw: "mapbox://styles/mapbox-map-design/cmcl29tgn008r01p69cx43vvx"),
+        "mapbox-light-2d": Entry(name: "Light 2D", raw: "mapbox://styles/mapbox-map-design/cmf04wyjp018e01sd3633800a"),
+        "mapbox-monochrome": Entry(name: "Monochrome", raw: "mapbox://styles/mapbox-map-design/cmcl1sypr006u01qv5l157uov"),
+        "mapbox-outdoors": Entry(name: "Outdoors", raw: "mapbox://styles/mapbox-map-design/cmh0wgofd00bu01srg2k73chv"),
+        "mapbox-outdoors-winter": Entry(name: "Outdoors Winter", raw: "mapbox://styles/mapbox-map-design/cmh0wje0n00bx01smbs4p3iz8"),
+        "mapbox-satellite": Entry(name: "Satellite", raw: "mapbox://styles/mapbox-map-design/cmcz3srn801br01qv31s62t4b"),
+        "mapbox-warm": Entry(name: "Warm", raw: "mapbox://styles/mapbox-map-design/cmclxpx6g007101s2d4kq4ivs"),
+    ]
+}
+
 /// Resolves a stored theme value — either a built-in `MapThemeOption` raw
 /// value or a full custom style URL (`mapbox://styles/owner/id`) pasted from
 /// Mapbox Studio or the community gallery. Any Mapbox style that is set to
@@ -126,7 +224,9 @@ enum MapThemeSelection {
 
     static func label(forRaw raw: String) -> String {
         if isCustomRaw(raw) {
-            return MapboxDesignerStyle.named(raw: raw)?.name ?? "Community style"
+            if let designer = MapboxDesignerStyle.named(raw: raw) { return designer.name }
+            if let entry = MapboxGalleryCatalog.entry(forRaw: raw) { return entry.name }
+            return "Community style"
         }
         return MapThemeOption.stored(from: raw).label
     }
@@ -136,9 +236,29 @@ enum MapThemeSelection {
             if let designer = MapboxDesignerStyle.named(raw: raw) {
                 return designer.blurb
             }
+            if MapboxGalleryCatalog.entry(forRaw: raw) != nil {
+                return "From the Mapbox style gallery"
+            }
             return raw.replacingOccurrences(of: "mapbox://styles/", with: "")
         }
         return MapThemeOption.stored(from: raw).detail
+    }
+
+    /// True when the input points at the Mapbox gallery page (a share link
+    /// like `mapbox.com/gallery#community-mineral`) rather than a style URL.
+    static func isGalleryLink(_ input: String) -> Bool {
+        input.lowercased().contains("mapbox.com/gallery")
+    }
+
+    /// Suggested bookmark name when saving a custom style: the known gallery
+    /// or designer name, otherwise the style's owner/id path so different
+    /// unknown styles stay tellable apart.
+    static func suggestedSaveName(forRaw raw: String) -> String {
+        let label = label(forRaw: raw)
+        if label == "Community style" {
+            return raw.replacingOccurrences(of: "mapbox://styles/", with: "")
+        }
+        return label
     }
 
     /// Normalizes a user-pasted style reference into a canonical
@@ -148,6 +268,13 @@ enum MapThemeSelection {
     static func normalizeCustomInput(_ input: String) -> String? {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
+
+        // Gallery share links and bare style names resolve through the
+        // baked-in catalog: "…mapbox.com/gallery#community-mineral",
+        // "community-mineral", or just "mineral".
+        if let galleryRaw = resolveGalleryReference(trimmed) {
+            return galleryRaw
+        }
 
         var owner: String?
         var styleID: String?
@@ -178,6 +305,27 @@ enum MapThemeSelection {
         return raw
     }
 
+    /// Resolves a gallery page link by its `#anchor` slug, or a bare slug or
+    /// style name typed straight into the field. Returns nil when the input
+    /// isn't a gallery reference or the style isn't in the catalog.
+    private static func resolveGalleryReference(_ input: String) -> String? {
+        if isGalleryLink(input) {
+            var candidate = input
+            if !candidate.lowercased().hasPrefix("http") {
+                candidate = "https://" + candidate
+            }
+            guard let url = URL(string: candidate),
+                  let fragment = url.fragment,
+                  let entry = MapboxGalleryCatalog.entry(forSlug: fragment) else { return nil }
+            return entry.raw
+        }
+        // Bare names and anchor slugs contain no URL punctuation.
+        if !input.contains("/"), !input.contains(":"), !input.contains(".") {
+            return MapboxGalleryCatalog.entry(forSlug: input)?.raw
+        }
+        return nil
+    }
+
     private static func isValidComponent(_ value: String) -> Bool {
         !value.isEmpty && value.allSatisfy {
             $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" || $0 == "."
@@ -185,10 +333,20 @@ enum MapThemeSelection {
     }
 }
 
-/// Mapbox-made designer styles from the public style gallery. They are owned
-/// by the `mapbox` account, so they render with any access token — instant
-/// community styles with no Studio setup. Style URLs come from Mapbox's
-/// official style-templates catalog.
+/// A community style the user bookmarked after pasting its link, so it can
+/// be re-applied anytime without hunting down the URL again. The collection
+/// is stored on the user's cloud profile and follows their account.
+nonisolated struct SavedMapStyle: Codable, Sendable, Identifiable, Equatable {
+    var name: String
+    let raw: String
+
+    var id: String { raw }
+}
+
+/// Featured designer styles from the public style gallery, shown as one-tap
+/// preset cards. All are owned by Mapbox accounts, so they render with any
+/// access token — instant community styles with no Studio setup. Style URLs
+/// match the gallery's own card data (see `MapboxGalleryCatalog`).
 struct MapboxDesignerStyle: Identifiable {
     let name: String
     let blurb: String
@@ -243,13 +401,37 @@ struct MapboxDesignerStyle: Identifiable {
             name: "Decimal",
             blurb: "Vintage control-panel greens",
             swatch: Color(red: 0.314, green: 0.659, blue: 0.51),
-            raw: "mapbox://styles/mapbox/cj5l80zrp29942rmtg0zctjto"
+            raw: "mapbox://styles/mapbox-map-design/ck4014y110wt61ctt07egsel6"
         ),
         MapboxDesignerStyle(
             name: "Minimo",
             blurb: "Clean Italian minimalism with stippling",
             swatch: Color(red: 0.718, green: 0.733, blue: 0.737),
-            raw: "mapbox://styles/mapbox/cjku6bhmo15oz2rs8p2n9s2hm"
+            raw: "mapbox://styles/mapbox-map-design/cksjc2nsq1bg117pnekb655h1"
+        ),
+        MapboxDesignerStyle(
+            name: "Pencil",
+            blurb: "Hand-sketched look, drawn in graphite",
+            swatch: Color(red: 0.55, green: 0.55, blue: 0.57),
+            raw: "mapbox://styles/mapbox-map-design/cks9iema71es417mlrft4go2k"
+        ),
+        MapboxDesignerStyle(
+            name: "Blueprint",
+            blurb: "Architectural drafting-table blues",
+            swatch: Color(red: 0.13, green: 0.32, blue: 0.65),
+            raw: "mapbox://styles/mapbox-map-design/cks97e1e37nsd17nzg7p0308g"
+        ),
+        MapboxDesignerStyle(
+            name: "Unicorn",
+            blurb: "Playful pinks with a magic touch",
+            swatch: Color(red: 0.93, green: 0.6, blue: 0.85),
+            raw: "mapbox://styles/mapbox-map-design/cl4fotjdi000l15p8cqc6nuts"
+        ),
+        MapboxDesignerStyle(
+            name: "Neon Glow",
+            blurb: "Dark map with electric neon lines",
+            swatch: Color(red: 0.0, green: 0.9, blue: 0.85),
+            raw: "mapbox://styles/mapbox-map-design/cl4gxqwi5001415l381n7qwak"
         ),
     ]
 }

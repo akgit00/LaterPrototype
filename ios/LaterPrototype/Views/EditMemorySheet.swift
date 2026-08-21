@@ -8,6 +8,7 @@ struct EditMemorySheet: View {
     let memoryID: UUID
     let viewModel: LaterViewModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(ProfileManager.self) private var profile
     @AppStorage(MapThemeOption.storageKey) private var globalThemeRaw: String = MapThemeOption.defaultTheme.rawValue
 
     @State private var title: String
@@ -21,6 +22,8 @@ struct EditMemorySheet: View {
     @State private var mapThemeRaw: String?
     @State private var customStyleInput: String = ""
     @State private var customStyleError: String?
+    @State private var showSaveStylePrompt = false
+    @State private var saveStyleName = ""
     @State private var pinColorName: String
     @State private var pinEmoji: String?
 
@@ -186,6 +189,17 @@ struct EditMemorySheet: View {
             .task { resolveAddress() }
             .task { await previews.generateAll() }
             .sensoryFeedback(.selection, trigger: mapThemeRaw)
+            .alert("Save this style", isPresented: $showSaveStylePrompt) {
+                TextField("Style name", text: $saveStyleName)
+                Button("Save") {
+                    if let raw = mapThemeRaw {
+                        profile.saveStyle(raw: raw, name: saveStyleName)
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Saved styles show up as quick picks here and in Map Themes.")
+            }
         }
     }
 
@@ -276,6 +290,9 @@ struct EditMemorySheet: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
                     matchAppCard
+                    ForEach(profile.savedMapStyles) { style in
+                        savedThemeCard(style)
+                    }
                     ForEach(MapThemeOption.allCases) { option in
                         themeCard(option)
                     }
@@ -319,6 +336,22 @@ struct EditMemorySheet: View {
                 fallbackIcon: previews.hasFailed(option) ? "wifi.slash" : nil,
                 label: option.label,
                 isSelected: mapThemeRaw == option.rawValue
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Quick pick for a community style the user bookmarked from a pasted
+    /// link — same collection that appears in Map Themes.
+    private func savedThemeCard(_ style: SavedMapStyle) -> some View {
+        Button {
+            mapThemeRaw = style.raw
+        } label: {
+            themeCardBody(
+                image: nil,
+                fallbackIcon: "bookmark.fill",
+                label: style.name,
+                isSelected: mapThemeRaw == style.raw
             )
         }
         .buttonStyle(.plain)
@@ -374,15 +407,17 @@ struct EditMemorySheet: View {
             .animation(.spring(duration: 0.25), value: isSelected)
     }
 
-    /// Shown while this memory uses a pasted community style.
+    /// Shown while this memory uses a pasted community style, with a
+    /// bookmark to keep it in the saved collection for reuse anywhere.
     private func activeCustomChip(_ raw: String) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "paintpalette.fill")
                 .font(.footnote)
                 .foregroundStyle(Color.accentColor)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Community style just for this memory")
+                Text("\(MapThemeSelection.label(forRaw: raw)) just for this memory")
                     .font(.caption.weight(.semibold))
+                    .lineLimit(1)
                 Text(MapThemeSelection.detail(forRaw: raw))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -390,6 +425,20 @@ struct EditMemorySheet: View {
                     .truncationMode(.middle)
             }
             Spacer()
+            Button {
+                if profile.isStyleSaved(raw) {
+                    profile.removeSavedStyle(raw: raw)
+                } else {
+                    saveStyleName = MapThemeSelection.suggestedSaveName(forRaw: raw)
+                    showSaveStylePrompt = true
+                }
+            } label: {
+                Image(systemName: profile.isStyleSaved(raw) ? "bookmark.fill" : "bookmark")
+            }
+            .font(.caption.weight(.semibold))
+            .buttonStyle(.bordered)
+            .tint(Color.accentColor)
+            .accessibilityLabel(profile.isStyleSaved(raw) ? "Remove from saved styles" : "Save this style")
             Button("Remove") { mapThemeRaw = nil }
                 .font(.caption.weight(.semibold))
                 .buttonStyle(.bordered)
@@ -401,7 +450,7 @@ struct EditMemorySheet: View {
     private var customStyleField: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                TextField("Community style URL (optional)", text: $customStyleInput)
+                TextField("Gallery link, style name, or style URL", text: $customStyleInput)
                     .textFieldStyle(.roundedBorder)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
@@ -424,7 +473,11 @@ struct EditMemorySheet: View {
 
     private func applyCustomStyle() {
         guard let raw = MapThemeSelection.normalizeCustomInput(customStyleInput) else {
-            customStyleError = "That doesn't look like a Mapbox style URL. In Mapbox Studio, use Share and copy the Style URL."
+            if MapThemeSelection.isGalleryLink(customStyleInput) {
+                customStyleError = "Couldn't match that gallery link to a style. Tap the style in the gallery first so the link ends in #community-…, or copy its Style URL instead."
+            } else {
+                customStyleError = "That doesn't look like a Mapbox style. Paste a gallery link, a style name, or a Style URL from Mapbox Studio."
+            }
             return
         }
         customStyleError = nil
