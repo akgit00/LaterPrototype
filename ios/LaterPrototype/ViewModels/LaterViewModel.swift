@@ -71,6 +71,12 @@ final class LaterViewModel {
     /// session, so the healing pass doesn't re-upload on every poll.
     private var healedMediaRowIDs: Set<UUID> = []
 
+    /// Memory ids with a payload push currently in flight. While a push is
+    /// pending, a background poll (whose fetch may predate the push) keeps the
+    /// local sub-memories instead of the server's, so a just-created pin can't
+    /// be wiped off screen by stale data.
+    private var pendingPayloadPushes: [UUID: Int] = [:]
+
     enum Tab: String {
         case explore
         case timeCapsules
@@ -193,12 +199,22 @@ final class LaterViewModel {
                 memories.map { ($0.id, $0.comments) },
                 uniquingKeysWith: { first, _ in first }
             )
+            let existingSubMemories = Dictionary(
+                memories.map { ($0.id, $0.subMemories) },
+                uniquingKeysWith: { first, _ in first }
+            )
             var updated = rows
                 .map { $0.payload }
                 .sorted { $0.date > $1.date }
             for index in updated.indices {
                 if let carried = existingComments[updated[index].id] {
                     updated[index].comments = carried
+                }
+                // Keep local sub-memories while their payload push is in
+                // flight (the fetched payload may predate the edit).
+                if pendingPayloadPushes[updated[index].id] != nil,
+                   let localSubs = existingSubMemories[updated[index].id] {
+                    updated[index].subMemories = localSubs
                 }
                 Self.stripUnreadableLocalMedia(from: &updated[index])
             }
@@ -408,6 +424,35 @@ final class LaterViewModel {
             if videos != updated[index].videos {
                 updated[index].videos = videos
             }
+
+            // Re-apply sub-memory placements recorded on the shared media rows
+            // (this is how a guest's pins reach everyone: the memory payload is
+            // owner-only, but media rows are writable by the whole memory).
+            var subs = updated[index].subMemories
+            if !subs.isEmpty {
+                for row in mediaRows {
+                    guard let subID = row.sub_memory_id,
+                          let target = subs.firstIndex(where: { $0.id == subID }) else { continue }
+                    if row.kind == "photo" {
+                        for i in subs.indices where i != target {
+                            subs[i].photoURLs.removeAll { $0 == row.url }
+                        }
+                        if !subs[target].photoURLs.contains(row.url) {
+                            subs[target].photoURLs.append(row.url)
+                        }
+                    } else {
+                        for i in subs.indices where i != target {
+                            subs[i].videoIDs.removeAll { $0 == row.id }
+                        }
+                        if !subs[target].videoIDs.contains(row.id) {
+                            subs[target].videoIDs.append(row.id)
+                        }
+                    }
+                }
+                if subs != updated[index].subMemories {
+                    updated[index].subMemories = subs
+                }
+            }
         }
     }
 
@@ -555,6 +600,21 @@ final class LaterViewModel {
         try? await CloudMemoryService.upsertMemory(uploaded, ownerID: userID)
     }
 
+    /// Pushes an owned memory's payload while marking the push as in flight,
+    /// so a concurrent poll can't overwrite just-edited sub-memories with a
+    /// stale server copy fetched before the push landed.
+    private func schedulePayloadPush(_ memoryID: UUID) {
+        pendingPayloadPushes[memoryID, default: 0] += 1
+        Task { @MainActor in
+            await pushMemory(memoryID)
+            if let count = pendingPayloadPushes[memoryID], count > 1 {
+                pendingPayloadPushes[memoryID] = count - 1
+            } else {
+                pendingPayloadPushes.removeValue(forKey: memoryID)
+            }
+        }
+    }
+
     // MARK: - Mutations
 
     private func persist() {
@@ -675,6 +735,9 @@ final class LaterViewModel {
         guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
         memories[index].photoURLs.removeAll { $0 == url }
         memories[index].pins.removeAll { $0.imageURL == url }
+        for i in memories[index].subMemories.indices {
+            memories[index].subMemories[i].photoURLs.removeAll { $0 == url }
+        }
         MediaStore.deleteFile(at: url)
         rebuildGlobalPins()
         persist()
@@ -687,6 +750,9 @@ final class LaterViewModel {
     func removeVideo(from memoryID: UUID, video: VideoAttachment) {
         guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
         memories[index].videos.removeAll { $0.id == video.id }
+        for i in memories[index].subMemories.indices {
+            memories[index].subMemories[i].videoIDs.removeAll { $0 == video.id }
+        }
         if let videoURL = video.videoURL {
             MediaStore.deleteFile(at: videoURL)
         }
@@ -696,6 +762,78 @@ final class LaterViewModel {
             try? await MediaService.deleteVideo(id: video.id)
             await pushMemory(memoryID)
         }
+    }
+
+    // MARK: - Memories inside a memory
+
+    /// Pins a smaller memory inside a bigger one. Owner-only: sub-memories
+    /// live in the memory payload, which only the owner may update.
+    func addSubMemory(to memoryID: UUID, title: String, coordinate: CLLocationCoordinate2D, date: Date) {
+        guard isOwned(memoryID),
+              let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        let sub = SubMemory(title: title, date: date, coordinate: coordinate)
+        memories[index].subMemories.append(sub)
+        persist()
+        schedulePayloadPush(memoryID)
+    }
+
+    /// Edits a pinned memory's title, spot, or date (owner-only).
+    func updateSubMemoryDetails(memoryID: UUID, subMemoryID: UUID, title: String, coordinate: CLLocationCoordinate2D, date: Date) {
+        guard isOwned(memoryID),
+              let index = memories.firstIndex(where: { $0.id == memoryID }),
+              let subIndex = memories[index].subMemories.firstIndex(where: { $0.id == subMemoryID }) else { return }
+        memories[index].subMemories[subIndex].title = title
+        memories[index].subMemories[subIndex].coordinate = coordinate
+        memories[index].subMemories[subIndex].date = date
+        persist()
+        schedulePayloadPush(memoryID)
+    }
+
+    /// Removes a pinned memory (owner-only). Its photos and videos stay in
+    /// the main memory — only the pin and its placements go away.
+    func deleteSubMemory(memoryID: UUID, subMemoryID: UUID) {
+        guard isOwned(memoryID),
+              let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        memories[index].subMemories.removeAll { $0.id == subMemoryID }
+        persist()
+        schedulePayloadPush(memoryID)
+        // Clear row placements so stale rows can't re-link media to the
+        // deleted pin on other devices.
+        Task { try? await MediaService.clearSubMemory(memoryID: memoryID, subMemoryID: subMemoryID) }
+    }
+
+    /// Pins a photo to a memory inside the memory (or back to the whole
+    /// memory with nil). Anyone on the memory can do it: the placement is
+    /// written onto the photo's shared media row, and the owner's payload
+    /// copy is updated too.
+    func assignPhoto(memoryID: UUID, url: String, to subMemoryID: UUID?) {
+        guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        for i in memories[index].subMemories.indices {
+            memories[index].subMemories[i].photoURLs.removeAll { $0 == url }
+        }
+        if let subMemoryID,
+           let subIndex = memories[index].subMemories.firstIndex(where: { $0.id == subMemoryID }) {
+            memories[index].subMemories[subIndex].photoURLs.append(url)
+        }
+        persist()
+        Task { try? await MediaService.setPhotoSubMemory(memoryID: memoryID, url: url, subMemoryID: subMemoryID) }
+        if isOwned(memoryID) { schedulePayloadPush(memoryID) }
+    }
+
+    /// Pins a video to a memory inside the memory (or back to the whole
+    /// memory with nil).
+    func assignVideo(memoryID: UUID, videoID: UUID, to subMemoryID: UUID?) {
+        guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
+        for i in memories[index].subMemories.indices {
+            memories[index].subMemories[i].videoIDs.removeAll { $0 == videoID }
+        }
+        if let subMemoryID,
+           let subIndex = memories[index].subMemories.firstIndex(where: { $0.id == subMemoryID }) {
+            memories[index].subMemories[subIndex].videoIDs.append(videoID)
+        }
+        persist()
+        Task { try? await MediaService.setVideoSubMemory(id: videoID, subMemoryID: subMemoryID) }
+        if isOwned(memoryID) { schedulePayloadPush(memoryID) }
     }
 
     /// Adds a comment to a memory. Works for the owner and any connection the
@@ -766,21 +904,32 @@ final class LaterViewModel {
     /// memory is shared with: the file is uploaded to storage and recorded in
     /// the dedicated media table so everyone on the memory sees it.
     @MainActor
-    func addPhotoURL(to memoryID: UUID, url localURL: String) async {
+    func addPhotoURL(to memoryID: UUID, url localURL: String, subMemoryID: UUID? = nil) async {
         guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
         // Show the local file immediately while it uploads.
         memories[index].photoURLs.append(localURL)
+        if let subMemoryID,
+           let subIndex = memories[index].subMemories.firstIndex(where: { $0.id == subMemoryID }) {
+            memories[index].subMemories[subIndex].photoURLs.append(localURL)
+        }
         persist()
 
         guard let userID = currentUserID, SupabaseREST.hasSession else { return }
         do {
             let publicURL = try await CloudMemoryService.uploadLocalFile(localURL, userID: userID, memoryID: memoryID)
-            if let i = memories.firstIndex(where: { $0.id == memoryID }),
-               let p = memories[i].photoURLs.firstIndex(of: localURL) {
-                memories[i].photoURLs[p] = publicURL
+            if let i = memories.firstIndex(where: { $0.id == memoryID }) {
+                if let p = memories[i].photoURLs.firstIndex(of: localURL) {
+                    memories[i].photoURLs[p] = publicURL
+                }
+                // Keep any sub-memory reference pointing at the uploaded copy.
+                for s in memories[i].subMemories.indices {
+                    if let r = memories[i].subMemories[s].photoURLs.firstIndex(of: localURL) {
+                        memories[i].subMemories[s].photoURLs[r] = publicURL
+                    }
+                }
                 persist()
             }
-            try await MediaService.postPhoto(memoryID: memoryID, url: publicURL)
+            try await MediaService.postPhoto(memoryID: memoryID, url: publicURL, subMemoryID: subMemoryID)
         } catch {
             // Never record a device-local path in the shared media table — other
             // people would count the photo but couldn't display it. Keep the
@@ -793,10 +942,14 @@ final class LaterViewModel {
     /// Adds a video to a memory. Works for the owner and any connection the
     /// memory is shared with.
     @MainActor
-    func addVideo(to memoryID: UUID, video: VideoAttachment) async {
+    func addVideo(to memoryID: UUID, video: VideoAttachment, subMemoryID: UUID? = nil) async {
         guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
         // Show the local video immediately while it uploads.
         memories[index].videos.append(video)
+        if let subMemoryID,
+           let subIndex = memories[index].subMemories.firstIndex(where: { $0.id == subMemoryID }) {
+            memories[index].subMemories[subIndex].videoIDs.append(video.id)
+        }
         persist()
 
         guard let userID = currentUserID, SupabaseREST.hasSession else { return }
@@ -824,7 +977,8 @@ final class LaterViewModel {
                     id: video.id,
                     url: publicVideoURL,
                     thumbnailURL: thumb,
-                    duration: video.duration
+                    duration: video.duration,
+                    subMemoryID: subMemoryID
                 )
             }
         } catch {

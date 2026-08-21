@@ -12,8 +12,16 @@ create table if not exists public.memory_media (
     url           text not null,
     thumbnail_url text,
     duration      text,
+    -- The memory-inside-a-memory (sub-memory) this media is pinned to, when
+    -- any. Sub-memories live in the memory payload (owner-only writes), so
+    -- placements are recorded here — the one media table everyone on the
+    -- memory can write — letting guests' pins sync to all participants.
+    sub_memory_id uuid,
     created_at    timestamptz not null default now()
 );
+
+-- Migration for tables created before sub-memories existed.
+alter table public.memory_media add column if not exists sub_memory_id uuid;
 
 create index if not exists memory_media_memory_idx on public.memory_media (memory_id);
 

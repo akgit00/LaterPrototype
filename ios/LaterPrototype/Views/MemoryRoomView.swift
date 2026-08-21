@@ -8,6 +8,9 @@ import UniformTypeIdentifiers
 /// photo (avoids the empty-sheet race of `isPresented` + optional index).
 struct PhotoViewerSelection: Identifiable {
     let id = UUID()
+    /// The photo list the viewer pages through (all photos, or just one
+    /// pinned memory's), captured at tap time so the index always matches.
+    let urls: [String]
     let index: Int
 }
 
@@ -26,6 +29,9 @@ struct MemoryRoomView: View {
     @State private var showDeleteMemoryConfirm: Bool = false
     @State private var isStartingSoundtrack: Bool = false
     @State private var soundtrackMessage: String?
+    /// The memory-inside-a-memory currently selected on the map / in the
+    /// media sheet. When set, the sheet shows only that pin's photos & videos.
+    @State private var selectedSubMemoryID: UUID?
 
     private var previewPlayer: PreviewPlayerService { .shared }
 
@@ -71,7 +77,7 @@ struct MemoryRoomView: View {
                         Annotation(pin.title, coordinate: pin.coordinate) {
                             Button {
                                 if let idx = memory.photoURLs.firstIndex(of: imageURL) {
-                                    photoViewer = PhotoViewerSelection(index: idx)
+                                    photoViewer = PhotoViewerSelection(urls: memory.photoURLs, index: idx)
                                 }
                             } label: {
                                 PhotoPinView(imageURL: imageURL, title: pin.title)
@@ -85,6 +91,45 @@ struct MemoryRoomView: View {
                                 SmallPinView()
                             }
                         }
+                    }
+                }
+
+                // The spiderweb: red threads from the main memory out to each
+                // memory pinned inside it, each with a photo preview.
+                if !memory.subMemories.isEmpty {
+                    ForEach(memory.subMemories) { sub in
+                        MapPolyline(coordinates: [memory.centerCoordinate, sub.coordinate])
+                            .stroke(
+                                .red.opacity(selectedSubMemoryID == nil || selectedSubMemoryID == sub.id ? 0.9 : 0.35),
+                                style: StrokeStyle(lineWidth: 2.5, lineCap: .round)
+                            )
+                    }
+
+                    ForEach(memory.subMemories) { sub in
+                        Annotation(sub.title, coordinate: sub.coordinate) {
+                            Button {
+                                toggleSubMemorySelection(sub)
+                            } label: {
+                                SubMemoryPinCard(
+                                    imageURL: coverImageURL(for: sub),
+                                    mediaCount: mediaCount(for: sub),
+                                    isSelected: selectedSubMemoryID == sub.id
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+
+                    Annotation(memory.title, coordinate: memory.centerCoordinate) {
+                        Button {
+                            clearSubMemorySelection()
+                        } label: {
+                            MemoryHubPinCard(
+                                imageURL: memory.photoURLs.first,
+                                isDimmed: selectedSubMemoryID != nil
+                            )
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
             }
@@ -106,6 +151,17 @@ struct MemoryRoomView: View {
         // are suppressed as banners and cleared from Notification Center.
         .onAppear {
             NotificationCenterDelegate.shared.activeThreadID = memoryID.uuidString.lowercased()
+            if let region = spiderwebRegion() {
+                mapPosition = .region(region)
+            }
+        }
+        // Refit the camera when pins inside the memory appear or change, so
+        // the whole web stays visible.
+        .onChange(of: memory.subMemories.count) { _, _ in
+            guard selectedSubMemoryID == nil, let region = spiderwebRegion() else { return }
+            withAnimation(.spring(duration: 0.6)) {
+                mapPosition = .region(region)
+            }
         }
         .onDisappear {
             if NotificationCenterDelegate.shared.activeThreadID == memoryID.uuidString.lowercased() {
@@ -120,7 +176,8 @@ struct MemoryRoomView: View {
                 playingVideoURL: $playingVideoURL,
                 showAddPeopleSheet: $showAddPeopleSheet,
                 showEditMemorySheet: $showEditMemorySheet,
-                addressPin: $addressPin
+                addressPin: $addressPin,
+                selectedSubMemoryID: $selectedSubMemoryID
             )
             .presentationDetents([.fraction(0.15), .fraction(0.45), .large], selection: $selectedDetent)
             .presentationDragIndicator(.visible)
@@ -142,6 +199,80 @@ struct MemoryRoomView: View {
         } message: {
             Text("This will permanently remove all photos, videos, and details for \"\(memory.title)\".")
         }
+    }
+
+    // MARK: - Memories inside (spiderweb)
+
+    /// Cover image for a pinned memory: its first photo, else a video thumbnail.
+    private func coverImageURL(for sub: SubMemory) -> String? {
+        if let photo = memory.photoURLs.first(where: { sub.photoURLs.contains($0) }) {
+            return photo
+        }
+        if let video = memory.videos.first(where: { sub.videoIDs.contains($0.id) }),
+           !video.thumbnailURL.isEmpty {
+            return video.thumbnailURL
+        }
+        return nil
+    }
+
+    private func mediaCount(for sub: SubMemory) -> Int {
+        memory.photoURLs.filter { sub.photoURLs.contains($0) }.count
+            + memory.videos.filter { sub.videoIDs.contains($0.id) }.count
+    }
+
+    private func toggleSubMemorySelection(_ sub: SubMemory) {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(.spring(duration: 0.5)) {
+            if selectedSubMemoryID == sub.id {
+                selectedSubMemoryID = nil
+                if let region = spiderwebRegion() {
+                    mapPosition = .region(region)
+                }
+            } else {
+                selectedSubMemoryID = sub.id
+                mapPosition = .region(MKCoordinateRegion(
+                    center: sub.coordinate,
+                    span: MKCoordinateSpan(latitudeDelta: 0.035, longitudeDelta: 0.035)
+                ))
+            }
+        }
+    }
+
+    private func clearSubMemorySelection() {
+        guard selectedSubMemoryID != nil else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(.spring(duration: 0.5)) {
+            selectedSubMemoryID = nil
+            if let region = spiderwebRegion() {
+                mapPosition = .region(region)
+            }
+        }
+    }
+
+    /// A camera region that fits the main memory and every memory pinned
+    /// inside it, with padding so the whole web is on screen.
+    private func spiderwebRegion() -> MKCoordinateRegion? {
+        guard !memory.subMemories.isEmpty else { return nil }
+        var minLat = memory.centerCoordinate.latitude
+        var maxLat = minLat
+        var minLon = memory.centerCoordinate.longitude
+        var maxLon = minLon
+        for sub in memory.subMemories {
+            minLat = min(minLat, sub.coordinate.latitude)
+            maxLat = max(maxLat, sub.coordinate.latitude)
+            minLon = min(minLon, sub.coordinate.longitude)
+            maxLon = max(maxLon, sub.coordinate.longitude)
+        }
+        return MKCoordinateRegion(
+            center: CLLocationCoordinate2D(
+                latitude: (minLat + maxLat) / 2,
+                longitude: (minLon + maxLon) / 2
+            ),
+            span: MKCoordinateSpan(
+                latitudeDelta: max((maxLat - minLat) * 1.7, 0.025),
+                longitudeDelta: max((maxLon - minLon) * 1.7, 0.025)
+            )
+        )
     }
 
     private var headerOverlay: some View {
@@ -339,6 +470,7 @@ struct MemoryMediaSheet: View {
     @Binding var showAddPeopleSheet: Bool
     @Binding var showEditMemorySheet: Bool
     @Binding var addressPin: MemoryPin?
+    @Binding var selectedSubMemoryID: UUID?
 
     @State private var selectedSection: MediaSection = .photos
     @State private var showAddPhotosPicker: Bool = false
@@ -348,6 +480,9 @@ struct MemoryMediaSheet: View {
     @State private var showAddSongSheet: Bool = false
     @State private var showVideoUnavailableAlert: Bool = false
     @State private var saveResultMessage: String?
+    @State private var showAddSubMemorySheet: Bool = false
+    @State private var subMemoryToEdit: SubMemory?
+    @State private var subMemoryToDelete: SubMemory?
 
     private var previewPlayer: PreviewPlayerService { .shared }
 
@@ -365,6 +500,7 @@ struct MemoryMediaSheet: View {
     enum MediaSection: String, CaseIterable {
         case photos = "Photos"
         case videos = "Videos"
+        case inside = "Inside"
         case playlist = "Playlist"
         case comments = "Comments"
         case people = "People"
@@ -422,11 +558,17 @@ struct MemoryMediaSheet: View {
                 }
                 .contentMargins(.horizontal, 0)
 
+                if !memory.subMemories.isEmpty && (selectedSection == .photos || selectedSection == .videos) {
+                    subMemoryFilterBar
+                }
+
                 switch selectedSection {
                 case .photos:
                     photosSection
                 case .videos:
                     videosSection
+                case .inside:
+                    insideSection
                 case .playlist:
                     playlistSection
                 case .comments:
@@ -451,7 +593,7 @@ struct MemoryMediaSheet: View {
             Task { await importPickedItems(captured) }
         }
         .sheet(item: $photoViewer) { selection in
-            PhotoViewerSheet(photoURLs: memory.photoURLs, initialIndex: selection.index, canSave: canSaveMedia)
+            PhotoViewerSheet(photoURLs: selection.urls, initialIndex: selection.index, canSave: canSaveMedia)
         }
         .sheet(item: $addressPin) { pin in
             PinAddressSheet(pin: pin)
@@ -491,6 +633,31 @@ struct MemoryMediaSheet: View {
             AddPeopleSheet(memoryID: memoryID, viewModel: viewModel)
                 .presentationDetents([.medium, .large])
         }
+        .sheet(isPresented: $showAddSubMemorySheet) {
+            SubMemoryEditorSheet(memoryID: memoryID, viewModel: viewModel, existing: nil)
+        }
+        .sheet(item: $subMemoryToEdit) { sub in
+            SubMemoryEditorSheet(memoryID: memoryID, viewModel: viewModel, existing: sub)
+        }
+        .confirmationDialog(
+            "Remove \"\(subMemoryToDelete?.title ?? "")\"?",
+            isPresented: Binding(
+                get: { subMemoryToDelete != nil },
+                set: { if !$0 { subMemoryToDelete = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Remove Pin", role: .destructive) {
+                if let sub = subMemoryToDelete {
+                    if selectedSubMemoryID == sub.id { selectedSubMemoryID = nil }
+                    viewModel.deleteSubMemory(memoryID: memoryID, subMemoryID: sub.id)
+                }
+                subMemoryToDelete = nil
+            }
+            Button("Cancel", role: .cancel) { subMemoryToDelete = nil }
+        } message: {
+            Text("Its photos and videos stay in the main memory — only the pin comes off the map.")
+        }
     }
 
     private func importPickedItems(_ items: [PhotosPickerItem]) async {
@@ -511,10 +678,10 @@ struct MemoryMediaSheet: View {
                     duration: duration,
                     videoURL: urlString
                 )
-                await viewModel.addVideo(to: memoryID, video: video)
+                await viewModel.addVideo(to: memoryID, video: video, subMemoryID: selectedSubMemoryID)
             } else {
                 guard let urlString = MediaStore.saveImage(data) else { continue }
-                await viewModel.addPhotoURL(to: memoryID, url: urlString)
+                await viewModel.addPhotoURL(to: memoryID, url: urlString, subMemoryID: selectedSubMemoryID)
             }
         }
     }
@@ -547,6 +714,7 @@ struct MemoryMediaSheet: View {
         switch section {
         case .photos: return "photo.fill"
         case .videos: return "video.fill"
+        case .inside: return "point.3.connected.trianglepath.dotted"
         case .playlist: return "music.note.list"
         case .comments: return "bubble.left.fill"
         case .people: return "person.2.fill"
@@ -557,6 +725,7 @@ struct MemoryMediaSheet: View {
         switch section {
         case .photos: return memory.photoURLs.count
         case .videos: return memory.videos.count
+        case .inside: return memory.subMemories.isEmpty ? nil : memory.subMemories.count
         case .playlist:
             let count = (memory.playlist != nil ? 1 : 0) + memory.songs.count
             return count > 0 ? count : nil
@@ -565,12 +734,299 @@ struct MemoryMediaSheet: View {
         }
     }
 
+    // MARK: - Memories inside a memory
+
+    /// The pinned memory currently filtering the media grid, if any.
+    private var selectedSub: SubMemory? {
+        guard let id = selectedSubMemoryID else { return nil }
+        return memory.subMemories.first { $0.id == id }
+    }
+
+    /// Photos shown for the current filter: everything, or one pin's photos.
+    private var visiblePhotoURLs: [String] {
+        guard let sub = selectedSub else { return memory.photoURLs }
+        return memory.photoURLs.filter { sub.photoURLs.contains($0) }
+    }
+
+    /// Videos shown for the current filter.
+    private var visibleVideos: [VideoAttachment] {
+        guard let sub = selectedSub else { return memory.videos }
+        return memory.videos.filter { sub.videoIDs.contains($0.id) }
+    }
+
+    private func mediaCount(for sub: SubMemory) -> Int {
+        photoCount(for: sub) + videoCount(for: sub)
+    }
+
+    private func photoCount(for sub: SubMemory) -> Int {
+        memory.photoURLs.filter { sub.photoURLs.contains($0) }.count
+    }
+
+    private func videoCount(for sub: SubMemory) -> Int {
+        memory.videos.filter { sub.videoIDs.contains($0.id) }.count
+    }
+
+    private func coverImageURL(for sub: SubMemory) -> String? {
+        if let photo = memory.photoURLs.first(where: { sub.photoURLs.contains($0) }) {
+            return photo
+        }
+        if let video = memory.videos.first(where: { sub.videoIDs.contains($0.id) }),
+           !video.thumbnailURL.isEmpty {
+            return video.thumbnailURL
+        }
+        return nil
+    }
+
+    /// Filter chips: All + one per pinned memory, matching the map's red web.
+    private var subMemoryFilterBar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    subMemoryChip(
+                        title: "All",
+                        count: memory.photoURLs.count + memory.videos.count,
+                        isOn: selectedSub == nil
+                    ) {
+                        selectedSubMemoryID = nil
+                    }
+                    ForEach(memory.subMemories) { sub in
+                        subMemoryChip(
+                            title: sub.title,
+                            count: mediaCount(for: sub),
+                            isOn: selectedSubMemoryID == sub.id
+                        ) {
+                            selectedSubMemoryID = selectedSubMemoryID == sub.id ? nil : sub.id
+                        }
+                    }
+                }
+                .padding(.horizontal, 20)
+            }
+            .contentMargins(.horizontal, 0)
+
+            if let sub = selectedSub {
+                Label("Showing \(sub.title) only — new photos and videos you add are pinned there.", systemImage: "point.3.connected.trianglepath.dotted")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 20)
+            }
+        }
+    }
+
+    private func subMemoryChip(title: String, count: Int, isOn: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                Text("\(count)")
+                    .font(.caption2.weight(.bold))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(
+                        isOn ? Color.white.opacity(0.25) : Color(.tertiarySystemFill),
+                        in: Capsule()
+                    )
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(
+                isOn ? AnyShapeStyle(Color.red) : AnyShapeStyle(Color(.tertiarySystemFill)),
+                in: Capsule()
+            )
+            .foregroundStyle(isOn ? AnyShapeStyle(Color.white) : AnyShapeStyle(Color.primary))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Context-menu submenu that pins a photo to one of the memories inside.
+    private func photoPinMenu(for url: String) -> some View {
+        Menu {
+            Button {
+                viewModel.assignPhoto(memoryID: memoryID, url: url, to: nil)
+            } label: {
+                if memory.subMemories.allSatisfy({ !$0.photoURLs.contains(url) }) {
+                    Label("Whole Memory", systemImage: "checkmark")
+                } else {
+                    Text("Whole Memory")
+                }
+            }
+            ForEach(memory.subMemories) { sub in
+                Button {
+                    viewModel.assignPhoto(memoryID: memoryID, url: url, to: sub.id)
+                } label: {
+                    if sub.photoURLs.contains(url) {
+                        Label(sub.title, systemImage: "checkmark")
+                    } else {
+                        Text(sub.title)
+                    }
+                }
+            }
+        } label: {
+            Label("Pin to Memory Inside", systemImage: "point.3.connected.trianglepath.dotted")
+        }
+    }
+
+    /// Context-menu submenu that pins a video to one of the memories inside.
+    private func videoPinMenu(for video: VideoAttachment) -> some View {
+        Menu {
+            Button {
+                viewModel.assignVideo(memoryID: memoryID, videoID: video.id, to: nil)
+            } label: {
+                if memory.subMemories.allSatisfy({ !$0.videoIDs.contains(video.id) }) {
+                    Label("Whole Memory", systemImage: "checkmark")
+                } else {
+                    Text("Whole Memory")
+                }
+            }
+            ForEach(memory.subMemories) { sub in
+                Button {
+                    viewModel.assignVideo(memoryID: memoryID, videoID: video.id, to: sub.id)
+                } label: {
+                    if sub.videoIDs.contains(video.id) {
+                        Label(sub.title, systemImage: "checkmark")
+                    } else {
+                        Text(sub.title)
+                    }
+                }
+            }
+        } label: {
+            Label("Pin to Memory Inside", systemImage: "point.3.connected.trianglepath.dotted")
+        }
+    }
+
+    private var insideSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("\(memory.subMemories.count) \(memory.subMemories.count == 1 ? "Memory" : "Memories") Inside")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if viewModel.isOwner(of: memoryID) {
+                    Button {
+                        showAddSubMemorySheet = true
+                    } label: {
+                        Label("Add", systemImage: "plus")
+                            .font(.subheadline.weight(.medium))
+                    }
+                }
+            }
+            .padding(.horizontal, 20)
+
+            if memory.subMemories.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "point.3.connected.trianglepath.dotted")
+                        .font(.system(size: 32))
+                        .foregroundStyle(.red)
+                    Text("Map out this memory")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Pin the smaller memories inside this one — where you fished, rode, ate — and they connect on the map like a web, each holding its own photos and videos.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 24)
+                    if viewModel.isOwner(of: memoryID) {
+                        Button {
+                            showAddSubMemorySheet = true
+                        } label: {
+                            Text("Pin a Memory Inside")
+                                .font(.subheadline.weight(.semibold))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                    } else {
+                        Text("Only the memory's creator can pin memories inside it.")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 32)
+            } else {
+                Text("Tap one to see just its photos and videos, or find it on the map.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 20)
+
+                VStack(spacing: 10) {
+                    ForEach(memory.subMemories) { sub in
+                        subMemoryRow(sub)
+                    }
+                }
+                .padding(.horizontal, 20)
+            }
+        }
+    }
+
+    private func subMemoryRow(_ sub: SubMemory) -> some View {
+        Button {
+            selectedSubMemoryID = selectedSubMemoryID == sub.id ? nil : sub.id
+            selectedSection = .photos
+        } label: {
+            HStack(spacing: 12) {
+                Color(.secondarySystemBackground)
+                    .frame(width: 56, height: 56)
+                    .overlay {
+                        if let cover = coverImageURL(for: sub) {
+                            MediaImageView(urlString: cover)
+                                .allowsHitTesting(false)
+                        } else {
+                            Image(systemName: "mappin.and.ellipse")
+                                .font(.title3)
+                                .foregroundStyle(.red)
+                        }
+                    }
+                    .clipShape(.rect(cornerRadius: 10))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(selectedSubMemoryID == sub.id ? Color.red : Color.clear, lineWidth: 2)
+                    }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(sub.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Text("\(photoCount(for: sub)) photos · \(videoCount(for: sub)) videos")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(sub.date, style: .date)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+
+                Spacer()
+
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(10)
+            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            if viewModel.isOwner(of: memoryID) {
+                Button {
+                    subMemoryToEdit = sub
+                } label: {
+                    Label("Edit", systemImage: "pencil")
+                }
+                Button(role: .destructive) {
+                    subMemoryToDelete = sub
+                } label: {
+                    Label("Remove Pin", systemImage: "trash")
+                }
+            }
+        }
+    }
+
     private var photosSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("\(memory.photoURLs.count) Photos")
+                Text(selectedSub == nil ? "\(visiblePhotoURLs.count) Photos" : "\(visiblePhotoURLs.count) in \(selectedSub?.title ?? "")")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
                 if isImporting {
                     ProgressView()
                         .controlSize(.small)
@@ -610,9 +1066,9 @@ struct MemoryMediaSheet: View {
                         }
                 }
 
-                ForEach(Array(memory.photoURLs.enumerated()), id: \.offset) { index, url in
+                ForEach(Array(visiblePhotoURLs.enumerated()), id: \.offset) { index, url in
                     Button {
-                        photoViewer = PhotoViewerSelection(index: index)
+                        photoViewer = PhotoViewerSelection(urls: visiblePhotoURLs, index: index)
                     } label: {
                         Color(.secondarySystemBackground)
                             .aspectRatio(1, contentMode: .fill)
@@ -623,6 +1079,9 @@ struct MemoryMediaSheet: View {
                             .clipShape(.rect(cornerRadius: 8))
                     }
                     .contextMenu {
+                        if !memory.subMemories.isEmpty {
+                            photoPinMenu(for: url)
+                        }
                         if canSaveMedia {
                             Button {
                                 saveToPhotos(photoURL: url)
@@ -645,9 +1104,10 @@ struct MemoryMediaSheet: View {
     private var videosSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("\(memory.videos.count) Videos")
+                Text(selectedSub == nil ? "\(visibleVideos.count) Videos" : "\(visibleVideos.count) in \(selectedSub?.title ?? "")")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
                 Spacer()
                 Button {
                     showAddPhotosPicker = true
@@ -658,7 +1118,7 @@ struct MemoryMediaSheet: View {
             }
             .padding(.horizontal, 20)
 
-            if memory.videos.isEmpty {
+            if visibleVideos.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "video.badge.plus")
                         .font(.system(size: 32))
@@ -697,7 +1157,7 @@ struct MemoryMediaSheet: View {
                                 }
                         }
 
-                        ForEach(memory.videos) { video in
+                        ForEach(visibleVideos) { video in
                             Button {
                                 if let urlString = video.videoURL, let url = URL(string: urlString) {
                                     playingVideoURL = url
@@ -708,6 +1168,9 @@ struct MemoryMediaSheet: View {
                                 VideoThumbnailCard(video: video)
                             }
                             .contextMenu {
+                                if !memory.subMemories.isEmpty {
+                                    videoPinMenu(for: video)
+                                }
                                 if canSaveMedia && video.videoURL != nil {
                                     Button {
                                         saveToPhotos(video: video)

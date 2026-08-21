@@ -182,6 +182,74 @@ nonisolated enum ConnectionColor: String, CaseIterable, Sendable, Codable {
     case blue, purple, pink, orange, green, teal
 }
 
+/// A smaller memory pinned INSIDE another memory — a place you went or a
+/// thing you did during the bigger moment (e.g. the fishing spot on a cabin
+/// trip). It lives in the parent memory's payload, so it syncs to everyone
+/// the memory is shared with. All media stays in the parent memory's pool;
+/// a sub-memory just references the photos (by URL) and videos (by id)
+/// that belong to its spot.
+nonisolated struct SubMemory: Identifiable, Sendable, Codable, Equatable {
+    let id: UUID
+    var title: String
+    var date: Date
+    var coordinate: CLLocationCoordinate2D
+    var photoURLs: [String]
+    var videoIDs: [UUID]
+
+    init(
+        id: UUID = UUID(),
+        title: String,
+        date: Date = Date(),
+        coordinate: CLLocationCoordinate2D,
+        photoURLs: [String] = [],
+        videoIDs: [UUID] = []
+    ) {
+        self.id = id
+        self.title = title
+        self.date = date
+        self.coordinate = coordinate
+        self.photoURLs = photoURLs
+        self.videoIDs = videoIDs
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, date, latitude, longitude, photoURLs, videoIDs
+    }
+
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        date = try container.decode(Date.self, forKey: .date)
+        let latitude = try container.decode(Double.self, forKey: .latitude)
+        let longitude = try container.decode(Double.self, forKey: .longitude)
+        coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        photoURLs = try container.decodeIfPresent([String].self, forKey: .photoURLs) ?? []
+        videoIDs = try container.decodeIfPresent([UUID].self, forKey: .videoIDs) ?? []
+    }
+
+    nonisolated func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(title, forKey: .title)
+        try container.encode(date, forKey: .date)
+        try container.encode(coordinate.latitude, forKey: .latitude)
+        try container.encode(coordinate.longitude, forKey: .longitude)
+        try container.encode(photoURLs, forKey: .photoURLs)
+        try container.encode(videoIDs, forKey: .videoIDs)
+    }
+
+    nonisolated static func == (lhs: SubMemory, rhs: SubMemory) -> Bool {
+        lhs.id == rhs.id
+            && lhs.title == rhs.title
+            && lhs.date == rhs.date
+            && lhs.coordinate.latitude == rhs.coordinate.latitude
+            && lhs.coordinate.longitude == rhs.coordinate.longitude
+            && lhs.photoURLs == rhs.photoURLs
+            && lhs.videoIDs == rhs.videoIDs
+    }
+}
+
 nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
     let id: UUID
     var title: String
@@ -199,6 +267,8 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
     var songs: [PlaylistTrack]
     var comments: [Comment]
     var connections: [Connection]
+    /// Smaller memories pinned inside this one, drawn as a red web on the map.
+    var subMemories: [SubMemory]
     /// When true, the owner allows everyone the memory is shared with to add
     /// more people to it.
     var allowsGuestInvites: Bool
@@ -223,6 +293,7 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
         songs: [PlaylistTrack] = [],
         comments: [Comment] = [],
         connections: [Connection] = [],
+        subMemories: [SubMemory] = [],
         allowsGuestInvites: Bool = false,
         allowsMediaSaving: Bool = true
     ) {
@@ -242,6 +313,7 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
         self.songs = songs
         self.comments = comments
         self.connections = connections
+        self.subMemories = subMemories
         self.allowsGuestInvites = allowsGuestInvites
         self.allowsMediaSaving = allowsMediaSaving
     }
@@ -250,6 +322,7 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
         case id, title, subtitle, date, creators
         case centerLatitude, centerLongitude, spanDelta
         case pins, photoURLs, videos, chatLog, music, playlist, songs, comments, connections
+        case subMemories
         case allowsGuestInvites, allowsMediaSaving
     }
 
@@ -270,6 +343,7 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
             && lhs.songs == rhs.songs
             && lhs.comments == rhs.comments
             && lhs.connections == rhs.connections
+            && lhs.subMemories == rhs.subMemories
             && lhs.allowsGuestInvites == rhs.allowsGuestInvites
             && lhs.allowsMediaSaving == rhs.allowsMediaSaving
     }
@@ -294,6 +368,7 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
         songs = try container.decodeIfPresent([PlaylistTrack].self, forKey: .songs) ?? []
         comments = try container.decode([Comment].self, forKey: .comments)
         connections = try container.decode([Connection].self, forKey: .connections)
+        subMemories = try container.decodeIfPresent([SubMemory].self, forKey: .subMemories) ?? []
         allowsGuestInvites = try container.decodeIfPresent(Bool.self, forKey: .allowsGuestInvites) ?? false
         allowsMediaSaving = try container.decodeIfPresent(Bool.self, forKey: .allowsMediaSaving) ?? true
     }
@@ -317,6 +392,7 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
         try container.encode(songs, forKey: .songs)
         try container.encode(comments, forKey: .comments)
         try container.encode(connections, forKey: .connections)
+        try container.encode(subMemories, forKey: .subMemories)
         try container.encode(allowsGuestInvites, forKey: .allowsGuestInvites)
         try container.encode(allowsMediaSaving, forKey: .allowsMediaSaving)
     }

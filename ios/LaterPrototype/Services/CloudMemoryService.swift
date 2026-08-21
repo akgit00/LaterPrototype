@@ -275,10 +275,23 @@ nonisolated enum CloudMemoryService {
         var updated = memory
 
         var newPhotos: [String] = []
+        var rewrittenPhotoURLs: [String: String] = [:]
         for url in updated.photoURLs {
-            newPhotos.append(await uploadIfLocal(url, userID: userID, memoryID: memory.id))
+            let uploaded = await uploadIfLocal(url, userID: userID, memoryID: memory.id)
+            if uploaded != url { rewrittenPhotoURLs[url] = uploaded }
+            newPhotos.append(uploaded)
         }
         updated.photoURLs = newPhotos
+
+        // Keep sub-memory photo references pointing at the uploaded copies,
+        // so a photo pinned to a spot doesn't fall out of it after upload.
+        if !rewrittenPhotoURLs.isEmpty {
+            updated.subMemories = updated.subMemories.map { sub in
+                var sub = sub
+                sub.photoURLs = sub.photoURLs.map { rewrittenPhotoURLs[$0] ?? $0 }
+                return sub
+            }
+        }
 
         updated.pins = await withTaskMappedPins(updated.pins, userID: userID, memoryID: memory.id)
 

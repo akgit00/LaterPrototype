@@ -818,7 +818,7 @@ struct CapsuleDetailSheet: View {
                             LazyVGrid(columns: columns, spacing: 4) {
                                 ForEach(Array(capsule.photoURLs.enumerated()), id: \.offset) { index, url in
                                     Button {
-                                        photoViewer = PhotoViewerSelection(index: index)
+                                        photoViewer = PhotoViewerSelection(urls: capsule.photoURLs, index: index)
                                     } label: {
                                         Color(.secondarySystemBackground)
                                             .aspectRatio(1, contentMode: .fill)
@@ -925,7 +925,7 @@ struct CapsuleDetailSheet: View {
                     : "This can't be undone.")
             }
             .sheet(item: $photoViewer) { selection in
-                PhotoViewerSheet(photoURLs: capsule.photoURLs, initialIndex: selection.index, canSave: true)
+                PhotoViewerSheet(photoURLs: selection.urls, initialIndex: selection.index, canSave: true)
             }
             .fullScreenCover(item: $playingVideoURL) { url in
                 VideoPlayerView(url: url, canSave: true)
