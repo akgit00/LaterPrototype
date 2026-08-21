@@ -154,6 +154,26 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    NavigationLink {
+                        MapThemeLabView()
+                    } label: {
+                        HStack(spacing: 12) {
+                            settingsIcon("map.fill", .teal)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Map Themes")
+                                Text("Pick the style for your maps")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                } header: {
+                    Text("Labs")
+                } footer: {
+                    Text("Your pick applies to the Explore globe and every memory's map right away.")
+                }
+
+                Section {
                     HStack(spacing: 12) {
                         settingsIcon("bell.badge.fill", .red)
                         Text("Push Notifications")

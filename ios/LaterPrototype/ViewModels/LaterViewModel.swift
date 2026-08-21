@@ -641,20 +641,23 @@ final class LaterViewModel {
         Task { await pushMemory(memory.id) }
     }
 
-    /// Edits a memory's core details (title, description, date, location).
+    /// Edits a memory's core details (title, description, date, location,
+    /// and its optional map-style override).
     /// Only the owner can do this; changes sync to everyone it's shared with.
     func updateMemoryDetails(
         memoryID: UUID,
         title: String,
         subtitle: String,
         date: Date,
-        coordinate: CLLocationCoordinate2D?
+        coordinate: CLLocationCoordinate2D?,
+        mapTheme: String?
     ) {
         guard let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
         var memory = memories[index]
         memory.title = title
         memory.subtitle = subtitle
         memory.date = date
+        memory.mapTheme = mapTheme
         if let coordinate {
             let movedFromCenter = memory.centerCoordinate.latitude != coordinate.latitude
                 || memory.centerCoordinate.longitude != coordinate.longitude

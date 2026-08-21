@@ -1,36 +1,32 @@
 import SwiftUI
-import MapKit
+import CoreLocation
+import MapboxMaps
 
 struct WorldMapView: View {
     let viewModel: LaterViewModel
-    @State private var position: MapCameraPosition = .camera(MapCamera(
-        centerCoordinate: CLLocationCoordinate2D(latitude: 30, longitude: -20),
-        distance: 30000000,
-        heading: 0,
+    @AppStorage(MapThemeOption.storageKey) private var mapThemeRaw: String = MapThemeOption.defaultTheme.rawValue
+    @State private var viewport: Viewport = .camera(
+        center: CLLocationCoordinate2D(latitude: 30, longitude: -20),
+        zoom: 0.9,
+        bearing: 0,
         pitch: 0
-    ))
+    )
     @State private var selectedMemoryID: UUID?
     @State private var showCreateMemory: Bool = false
+    @State private var timelineHeight: CGFloat = 0
 
     private var location: LocationService { .shared }
 
+    private var mapThemeStyle: MapStyle { MapThemeSelection.mapStyle(forRaw: mapThemeRaw) }
+
+    init(viewModel: LaterViewModel) {
+        self.viewModel = viewModel
+        MapboxSetup.configureIfNeeded()
+    }
+
     var body: some View {
         ZStack(alignment: .bottom) {
-            Map(position: $position) {
-                UserAnnotation()
-
-                ForEach(viewModel.memories) { memory in
-                    Annotation(memory.title, coordinate: memory.centerCoordinate) {
-                        Button {
-                            selectedMemoryID = memory.id
-                        } label: {
-                            MemoryPinView(memory: memory)
-                        }
-                    }
-                }
-            }
-            .mapStyle(.imagery(elevation: .realistic))
-            .ignoresSafeArea()
+            mapLayer
 
             VStack(spacing: 0) {
                 HStack {
@@ -66,14 +62,17 @@ struct WorldMapView: View {
                     memories: viewModel.memories,
                     onMemorySelected: { memory in
                         selectedMemoryID = memory.id
-                        withAnimation(.spring(duration: 0.6)) {
-                            position = .region(MKCoordinateRegion(
-                                center: memory.centerCoordinate,
-                                span: MKCoordinateSpan(latitudeDelta: memory.spanDelta, longitudeDelta: memory.spanDelta)
-                            ))
-                        }
+                        flyTo(
+                            center: memory.centerCoordinate,
+                            zoom: MapCameraMath.zoom(forSpanDelta: memory.spanDelta)
+                        )
                     }
                 )
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.size.height
+                } action: { newHeight in
+                    timelineHeight = newHeight
+                }
             }
         }
         .overlay {
@@ -99,14 +98,52 @@ struct WorldMapView: View {
         }
     }
 
+    /// The themed Mapbox globe with every memory pinned on it. Falls back to
+    /// a notice when the app was built without a Mapbox token.
+    @ViewBuilder
+    private var mapLayer: some View {
+        if MapboxSetup.hasToken {
+            Map(viewport: $viewport) {
+                Puck2D()
+
+                ForEvery(viewModel.memories) { memory in
+                    MapViewAnnotation(coordinate: memory.centerCoordinate) {
+                        Button {
+                            selectedMemoryID = memory.id
+                        } label: {
+                            MemoryPinView(memory: memory)
+                        }
+                    }
+                    .allowOverlap(true)
+                    .allowZElevate(true)
+                }
+            }
+            .mapStyle(mapThemeStyle)
+            .additionalSafeAreaInsets(.bottom, timelineHeight)
+            .ignoresSafeArea()
+        } else {
+            ZStack {
+                Color.black.ignoresSafeArea()
+                ContentUnavailableView {
+                    Label("Map unavailable", systemImage: "key.slash")
+                        .foregroundStyle(.white)
+                } description: {
+                    Text("Add your Mapbox public token and rebuild the app to load the globe.")
+                        .foregroundStyle(.white.opacity(0.8))
+                }
+            }
+        }
+    }
+
     private func centerOnMyLocation() {
         location.requestLocation()
         guard let coordinate = location.currentCoordinate else { return }
-        withAnimation(.spring(duration: 0.8)) {
-            position = .region(MKCoordinateRegion(
-                center: coordinate,
-                span: MKCoordinateSpan(latitudeDelta: 0.1, longitudeDelta: 0.1)
-            ))
+        flyTo(center: coordinate, zoom: 12.2)
+    }
+
+    private func flyTo(center: CLLocationCoordinate2D, zoom: Double) {
+        withViewportAnimation(.fly) {
+            viewport = .camera(center: center, zoom: zoom, bearing: 0, pitch: 0)
         }
     }
 }

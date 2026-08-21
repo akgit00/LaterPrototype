@@ -316,6 +316,10 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
     /// When true, the owner allows everyone the memory is shared with to save
     /// its photos and videos to their own Photos library.
     var allowsMediaSaving: Bool
+    /// Raw `MapThemeOption` value chosen just for this memory's map. Nil (or
+    /// an unrecognized value) means the memory follows the app-wide theme the
+    /// user picked in Settings, matching the Explore globe.
+    var mapTheme: String?
 
     init(
         id: UUID = UUID(),
@@ -336,7 +340,8 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
         connections: [Connection] = [],
         subMemories: [SubMemory] = [],
         allowsGuestInvites: Bool = false,
-        allowsMediaSaving: Bool = true
+        allowsMediaSaving: Bool = true,
+        mapTheme: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -357,6 +362,7 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
         self.subMemories = subMemories
         self.allowsGuestInvites = allowsGuestInvites
         self.allowsMediaSaving = allowsMediaSaving
+        self.mapTheme = mapTheme
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -365,6 +371,7 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
         case pins, photoURLs, videos, chatLog, music, playlist, songs, comments, connections
         case subMemories
         case allowsGuestInvites, allowsMediaSaving
+        case mapTheme
     }
 
     nonisolated static func == (lhs: Memory, rhs: Memory) -> Bool {
@@ -387,6 +394,7 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
             && lhs.subMemories == rhs.subMemories
             && lhs.allowsGuestInvites == rhs.allowsGuestInvites
             && lhs.allowsMediaSaving == rhs.allowsMediaSaving
+            && lhs.mapTheme == rhs.mapTheme
     }
 
     nonisolated init(from decoder: Decoder) throws {
@@ -412,6 +420,7 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
         subMemories = try container.decodeIfPresent([SubMemory].self, forKey: .subMemories) ?? []
         allowsGuestInvites = try container.decodeIfPresent(Bool.self, forKey: .allowsGuestInvites) ?? false
         allowsMediaSaving = try container.decodeIfPresent(Bool.self, forKey: .allowsMediaSaving) ?? true
+        mapTheme = try container.decodeIfPresent(String.self, forKey: .mapTheme)
     }
 
     nonisolated func encode(to encoder: Encoder) throws {
@@ -436,5 +445,6 @@ nonisolated struct Memory: Identifiable, Sendable, Codable, Equatable {
         try container.encode(subMemories, forKey: .subMemories)
         try container.encode(allowsGuestInvites, forKey: .allowsGuestInvites)
         try container.encode(allowsMediaSaving, forKey: .allowsMediaSaving)
+        try container.encodeIfPresent(mapTheme, forKey: .mapTheme)
     }
 }

@@ -138,6 +138,41 @@ nonisolated enum CloudMemoryService {
         )
     }
 
+    /// Reads the user's saved map theme from their profile row. Any failure
+    /// (including a database that doesn't have the column yet) returns nil so
+    /// the caller keeps local state.
+    static func fetchMapTheme(userID: String) async -> String? {
+        struct ThemeRow: Codable {
+            let map_theme: String?
+        }
+        guard let data = try? await SupabaseREST.request(
+            path: "profiles",
+            method: "GET",
+            query: [
+                URLQueryItem(name: "id", value: "eq.\(userID)"),
+                URLQueryItem(name: "select", value: "map_theme"),
+                URLQueryItem(name: "limit", value: "1"),
+            ]
+        ) else { return nil }
+        return (try? SupabaseREST.makeDecoder().decode([ThemeRow].self, from: data))?.first?.map_theme
+    }
+
+    /// Saves the user's app-wide map theme on their profile row so the pick
+    /// survives reinstalls and follows their account across devices.
+    static func updateMapTheme(userID: String, raw: String) async {
+        struct ThemeUpdate: Encodable {
+            let map_theme: String
+        }
+        guard let body = try? SupabaseREST.makeEncoder().encode(ThemeUpdate(map_theme: raw)) else { return }
+        try? await SupabaseREST.request(
+            path: "profiles",
+            method: "PATCH",
+            query: [URLQueryItem(name: "id", value: "eq.\(userID)")],
+            body: body,
+            prefer: "return=minimal"
+        )
+    }
+
     /// Uploads a locally-stored avatar image to Storage and returns its public
     /// URL. Returns nil for non-local or already-remote URLs.
     static func uploadAvatar(_ urlString: String, userID: String) async -> String? {

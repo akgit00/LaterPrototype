@@ -1,5 +1,6 @@
 import SwiftUI
 import MapKit
+import MapboxMaps
 import PhotosUI
 import AVKit
 import UniformTypeIdentifiers
@@ -14,11 +15,29 @@ struct PhotoViewerSelection: Identifiable {
     let index: Int
 }
 
+/// MapKit-style caption shown under a map marker — Mapbox view annotations
+/// don't draw an annotation title on their own.
+private struct MapPinTitleLabel: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.white)
+            .lineLimit(1)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(.black.opacity(0.45), in: Capsule())
+            .shadow(color: .black.opacity(0.3), radius: 2)
+    }
+}
+
 struct MemoryRoomView: View {
     let memoryID: UUID
     let viewModel: LaterViewModel
     @Environment(\.dismiss) private var dismiss
-    @State private var mapPosition: MapCameraPosition
+    @AppStorage(MapThemeOption.storageKey) private var storedThemeRaw: String = MapThemeOption.defaultTheme.rawValue
+    @State private var viewport: Viewport
     @State private var photoViewer: PhotoViewerSelection?
     @State private var selectedDetent: PresentationDetent = .fraction(0.45)
     @State private var showMediaSheet: Bool = true
@@ -70,142 +89,30 @@ struct MemoryRoomView: View {
     init(memoryID: UUID, viewModel: LaterViewModel) {
         self.memoryID = memoryID
         self.viewModel = viewModel
+        MapboxSetup.configureIfNeeded()
         let mem = viewModel.memoryByID(memoryID)
         let hasWeb = !(mem?.subMemories.isEmpty ?? true)
         // A memory with pins inside opens with the media sheet collapsed and
         // the camera framing the whole web above it, so the expansion
         // animation plays in full view instead of behind the sheet.
         _selectedDetent = State(initialValue: hasWeb ? .fraction(0.15) : .fraction(0.45))
-        if hasWeb, let mem, let region = Self.spiderwebRegion(for: mem, sheetFraction: 0.15) {
-            _mapPosition = State(initialValue: .region(region))
+        if hasWeb, let mem, let webViewport = Self.spiderwebViewport(for: mem, sheetFraction: 0.15) {
+            _viewport = State(initialValue: webViewport)
         } else {
             let center = mem?.centerCoordinate ?? CLLocationCoordinate2D()
             let span = mem?.spanDelta ?? 0.5
-            _mapPosition = State(initialValue: .region(MKCoordinateRegion(
+            _viewport = State(initialValue: .camera(
                 center: center,
-                span: MKCoordinateSpan(latitudeDelta: span, longitudeDelta: span)
-            )))
+                zoom: MapCameraMath.zoom(forSpanDelta: span),
+                bearing: 0,
+                pitch: 0
+            ))
         }
     }
 
     var body: some View {
         ZStack(alignment: .top) {
-            Map(position: $mapPosition, interactionModes: [.pan, .zoom]) {
-                ForEach(memory.pins) { pin in
-                    if let imageURL = pin.imageURL {
-                        Annotation(pin.title, coordinate: pin.coordinate) {
-                            Button {
-                                if let idx = memory.photoURLs.firstIndex(of: imageURL) {
-                                    photoViewer = PhotoViewerSelection(urls: memory.photoURLs, index: idx)
-                                }
-                            } label: {
-                                PhotoPinView(imageURL: imageURL, title: pin.title)
-                            }
-                        }
-                    } else {
-                        Annotation(pin.title, coordinate: pin.coordinate) {
-                            Button {
-                                addressPin = pin
-                            } label: {
-                                SmallPinView()
-                            }
-                        }
-                    }
-                }
-
-                // The spiderweb: red threads from the main memory out to each
-                // memory pinned inside it, each with a photo preview. On open
-                // the hub pops in first, then each thread draws outward and
-                // its pin springs in.
-                if !memory.subMemories.isEmpty {
-                    ForEach(memory.subMemories) { sub in
-                        if (webRevealProgress[sub.id] ?? 0) > 0.01 {
-                            MapPolyline(coordinates: [
-                                memory.centerCoordinate,
-                                threadEndpoint(for: sub, progress: webRevealProgress[sub.id] ?? 0)
-                            ])
-                            .stroke(
-                                .red.opacity(selectedSubMemoryID == nil || selectedSubMemoryID == sub.id ? 0.9 : 0.35),
-                                style: StrokeStyle(lineWidth: 2.5, lineCap: .round)
-                            )
-                        }
-                    }
-
-                    ForEach(memory.subMemories) { sub in
-                        Annotation(sub.title, coordinate: sub.coordinate) {
-                            Button {
-                                toggleSubMemorySelection(sub)
-                            } label: {
-                                SubMemoryPinCard(
-                                    imageURL: coverImageURL(for: sub),
-                                    mediaCount: mediaCount(for: sub),
-                                    isSelected: selectedSubMemoryID == sub.id,
-                                    durationText: sub.durationBadgeText
-                                )
-                                .scaleEffect(isPinRevealed(sub) ? 1 : 0.01, anchor: .bottom)
-                                .opacity(isPinRevealed(sub) ? 1 : 0)
-                                .animation(.spring(duration: 0.5, bounce: 0.55), value: isPinRevealed(sub))
-                            }
-                            .buttonStyle(.plain)
-                            .contextMenu {
-                                if viewModel.isOwner(of: memoryID) {
-                                    Button {
-                                        mapSubMemoryToEdit = sub
-                                    } label: {
-                                        Label("Edit", systemImage: "pencil")
-                                    }
-                                    Button(role: .destructive) {
-                                        mapSubMemoryToDelete = sub
-                                    } label: {
-                                        Label("Remove Pin", systemImage: "trash")
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    Annotation(memory.title, coordinate: memory.centerCoordinate) {
-                        Button {
-                            clearSubMemorySelection()
-                        } label: {
-                            MemoryHubPinCard(
-                                imageURL: memory.photoURLs.first,
-                                isDimmed: selectedSubMemoryID != nil,
-                                insideCount: memory.subMemories.count
-                            )
-                            .scaleEffect(hubRevealed ? 1 : 0.01, anchor: .bottom)
-                            .opacity(hubRevealed ? 1 : 0)
-                            .animation(.spring(duration: 0.5, bounce: 0.4), value: hubRevealed)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-            .mapStyle(.imagery(elevation: .realistic))
-            .ignoresSafeArea()
-            .sheet(item: $mapSubMemoryToEdit) { sub in
-                SubMemoryEditorSheet(memoryID: memoryID, viewModel: viewModel, existing: sub)
-            }
-            .confirmationDialog(
-                "Remove \"\(mapSubMemoryToDelete?.title ?? "")\"?",
-                isPresented: Binding(
-                    get: { mapSubMemoryToDelete != nil },
-                    set: { if !$0 { mapSubMemoryToDelete = nil } }
-                ),
-                titleVisibility: .visible
-            ) {
-                Button("Remove Pin", role: .destructive) {
-                    if let sub = mapSubMemoryToDelete {
-                        if selectedSubMemoryID == sub.id { selectedSubMemoryID = nil }
-                        webRevealProgress[sub.id] = nil
-                        viewModel.deleteSubMemory(memoryID: memoryID, subMemoryID: sub.id)
-                    }
-                    mapSubMemoryToDelete = nil
-                }
-                Button("Cancel", role: .cancel) { mapSubMemoryToDelete = nil }
-            } message: {
-                Text("Its photos and videos stay in the main memory — only the pin comes off the map.")
-            }
+            mapLayer
 
             headerOverlay
         }
@@ -222,8 +129,8 @@ struct MemoryRoomView: View {
         // are suppressed as banners and cleared from Notification Center.
         .onAppear {
             NotificationCenterDelegate.shared.activeThreadID = memoryID.uuidString.lowercased()
-            if let region = spiderwebRegion() {
-                mapPosition = .region(region)
+            if let webViewport = spiderwebViewport() {
+                viewport = webViewport
             }
             animateWebExpansion()
         }
@@ -231,9 +138,9 @@ struct MemoryRoomView: View {
         // the whole web stays visible.
         .onChange(of: memory.subMemories.count) { _, _ in
             animateWebExpansion()
-            guard selectedSubMemoryID == nil, let region = spiderwebRegion() else { return }
-            withAnimation(.spring(duration: 0.6)) {
-                mapPosition = .region(region)
+            guard selectedSubMemoryID == nil, let webViewport = spiderwebViewport() else { return }
+            withViewportAnimation(.default(maxDuration: 0.6)) {
+                viewport = webViewport
             }
         }
         .onDisappear {
@@ -272,6 +179,209 @@ struct MemoryRoomView: View {
         } message: {
             Text("This will permanently remove all photos, videos, and details for \"\(memory.title)\".")
         }
+    }
+
+    // MARK: - Themed Mapbox map
+
+    /// The style for this memory's map: its own override when set, otherwise
+    /// the app-wide pick from Settings so it matches the Explore globe. Both
+    /// built-in themes and custom community style URLs resolve here.
+    private var resolvedThemeStyle: MapboxMaps.MapStyle {
+        MapThemeSelection.mapStyle(forRaw: memory.resolvedMapThemeRaw(globalRaw: storedThemeRaw))
+    }
+
+    /// Pan and zoom only, matching the old MapKit interaction modes so the
+    /// spiderweb layout stays top-down.
+    private static var roomGestureOptions: GestureOptions {
+        var options = GestureOptions()
+        options.rotateEnabled = false
+        options.pitchEnabled = false
+        return options
+    }
+
+    /// The themed map, or a notice when the app was built without a token.
+    private var mapLayer: some View {
+        Group {
+            if MapboxSetup.hasToken {
+                themedMemoryMap
+            } else {
+                missingTokenFallback
+            }
+        }
+        .sheet(item: $mapSubMemoryToEdit) { sub in
+            SubMemoryEditorSheet(memoryID: memoryID, viewModel: viewModel, existing: sub)
+        }
+        .confirmationDialog(
+            "Remove \"\(mapSubMemoryToDelete?.title ?? "")\"?",
+            isPresented: Binding(
+                get: { mapSubMemoryToDelete != nil },
+                set: { if !$0 { mapSubMemoryToDelete = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Remove Pin", role: .destructive) {
+                if let sub = mapSubMemoryToDelete {
+                    if selectedSubMemoryID == sub.id { selectedSubMemoryID = nil }
+                    webRevealProgress[sub.id] = nil
+                    viewModel.deleteSubMemory(memoryID: memoryID, subMemoryID: sub.id)
+                }
+                mapSubMemoryToDelete = nil
+            }
+            Button("Cancel", role: .cancel) { mapSubMemoryToDelete = nil }
+        } message: {
+            Text("Its photos and videos stay in the main memory — only the pin comes off the map.")
+        }
+    }
+
+    private var themedMemoryMap: some View {
+        MapboxMaps.Map(viewport: $viewport) {
+            memoryPinContent
+            if !memory.subMemories.isEmpty {
+                spiderwebContent
+            }
+        }
+        .mapStyle(resolvedThemeStyle)
+        .gestureOptions(Self.roomGestureOptions)
+        .ignoresSafeArea()
+    }
+
+    private var missingTokenFallback: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            ContentUnavailableView {
+                Label("Map unavailable", systemImage: "key.slash")
+                    .foregroundStyle(.white)
+            } description: {
+                Text("Add your Mapbox public token and rebuild the app to see this memory's map.")
+                    .foregroundStyle(.white.opacity(0.8))
+            }
+        }
+    }
+
+    /// Standalone photo / address pins that belong to the memory itself.
+    @MapboxMaps.MapContentBuilder
+    private var memoryPinContent: some MapboxMaps.MapContent {
+        ForEvery(memory.pins) { pin in
+            MapViewAnnotation(coordinate: pin.coordinate) {
+                pinAnnotationView(for: pin)
+            }
+            .allowOverlap(true)
+            .allowZElevate(true)
+        }
+    }
+
+    /// The red web: threads from the hub out to each pinned memory, the
+    /// pinned memory cards, and the hub card itself. On open the hub pops in
+    /// first, then each thread draws outward and its pin springs in.
+    @MapboxMaps.MapContentBuilder
+    private var spiderwebContent: some MapboxMaps.MapContent {
+        PolylineAnnotationGroup(revealedSubMemories, id: \.id) { sub in
+            PolylineAnnotation(id: "web-thread-\(sub.id.uuidString)", lineCoordinates: [
+                memory.centerCoordinate,
+                threadEndpoint(for: sub, progress: webRevealProgress[sub.id] ?? 0)
+            ])
+            .lineColor(StyleColor(UIColor.systemRed))
+            .lineWidth(2.5)
+            .lineOpacity(selectedSubMemoryID == nil || selectedSubMemoryID == sub.id ? 0.9 : 0.35)
+        }
+        .lineCap(.round)
+
+        ForEvery(memory.subMemories) { sub in
+            MapViewAnnotation(coordinate: sub.coordinate) {
+                subMemoryAnnotationView(for: sub)
+            }
+            .allowOverlap(true)
+            .allowZElevate(true)
+        }
+
+        MapViewAnnotation(coordinate: memory.centerCoordinate) {
+            hubAnnotationView
+        }
+        .allowOverlap(true)
+        .allowZElevate(true)
+    }
+
+    /// Threads are only drawn once their reveal animation has started.
+    private var revealedSubMemories: [SubMemory] {
+        memory.subMemories.filter { (webRevealProgress[$0.id] ?? 0) > 0.01 }
+    }
+
+    @ViewBuilder
+    private func pinAnnotationView(for pin: MemoryPin) -> some View {
+        VStack(spacing: 3) {
+            if let imageURL = pin.imageURL {
+                Button {
+                    if let idx = memory.photoURLs.firstIndex(of: imageURL) {
+                        photoViewer = PhotoViewerSelection(urls: memory.photoURLs, index: idx)
+                    }
+                } label: {
+                    PhotoPinView(imageURL: imageURL, title: pin.title)
+                }
+            } else {
+                Button {
+                    addressPin = pin
+                } label: {
+                    SmallPinView()
+                }
+            }
+
+            MapPinTitleLabel(text: pin.title)
+        }
+    }
+
+    private func subMemoryAnnotationView(for sub: SubMemory) -> some View {
+        VStack(spacing: 3) {
+            Button {
+                toggleSubMemorySelection(sub)
+            } label: {
+                SubMemoryPinCard(
+                    imageURL: coverImageURL(for: sub),
+                    mediaCount: mediaCount(for: sub),
+                    isSelected: selectedSubMemoryID == sub.id,
+                    durationText: sub.durationBadgeText
+                )
+            }
+            .buttonStyle(.plain)
+            .contextMenu {
+                if viewModel.isOwner(of: memoryID) {
+                    Button {
+                        mapSubMemoryToEdit = sub
+                    } label: {
+                        Label("Edit", systemImage: "pencil")
+                    }
+                    Button(role: .destructive) {
+                        mapSubMemoryToDelete = sub
+                    } label: {
+                        Label("Remove Pin", systemImage: "trash")
+                    }
+                }
+            }
+
+            MapPinTitleLabel(text: sub.title)
+        }
+        .scaleEffect(isPinRevealed(sub) ? 1 : 0.01, anchor: .bottom)
+        .opacity(isPinRevealed(sub) ? 1 : 0)
+        .animation(.spring(duration: 0.5, bounce: 0.55), value: isPinRevealed(sub))
+    }
+
+    private var hubAnnotationView: some View {
+        VStack(spacing: 3) {
+            Button {
+                clearSubMemorySelection()
+            } label: {
+                MemoryHubPinCard(
+                    imageURL: memory.photoURLs.first,
+                    isDimmed: selectedSubMemoryID != nil,
+                    insideCount: memory.subMemories.count
+                )
+            }
+            .buttonStyle(.plain)
+
+            MapPinTitleLabel(text: memory.title)
+        }
+        .scaleEffect(hubRevealed ? 1 : 0.01, anchor: .bottom)
+        .opacity(hubRevealed ? 1 : 0)
+        .animation(.spring(duration: 0.5, bounce: 0.4), value: hubRevealed)
     }
 
     // MARK: - Memories inside (spiderweb)
@@ -366,15 +476,22 @@ struct MemoryRoomView: View {
         withAnimation(.spring(duration: 0.5)) {
             if selectedSubMemoryID == sub.id {
                 selectedSubMemoryID = nil
-                if let region = spiderwebRegion() {
-                    mapPosition = .region(region)
-                }
             } else {
                 selectedSubMemoryID = sub.id
-                mapPosition = .region(MKCoordinateRegion(
+            }
+        }
+        if let selectedID = selectedSubMemoryID, selectedID == sub.id {
+            withViewportAnimation(.default(maxDuration: 0.55)) {
+                viewport = .camera(
                     center: sub.coordinate,
-                    span: MKCoordinateSpan(latitudeDelta: 0.035, longitudeDelta: 0.035)
-                ))
+                    zoom: MapCameraMath.zoom(forSpanDelta: 0.035),
+                    bearing: 0,
+                    pitch: 0
+                )
+            }
+        } else if let webViewport = spiderwebViewport() {
+            withViewportAnimation(.default(maxDuration: 0.55)) {
+                viewport = webViewport
             }
         }
     }
@@ -384,16 +501,18 @@ struct MemoryRoomView: View {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         withAnimation(.spring(duration: 0.5)) {
             selectedSubMemoryID = nil
-            if let region = spiderwebRegion() {
-                mapPosition = .region(region)
+        }
+        if let webViewport = spiderwebViewport() {
+            withViewportAnimation(.default(maxDuration: 0.55)) {
+                viewport = webViewport
             }
         }
     }
 
-    /// A camera region that fits the main memory and every memory pinned
-    /// inside it, sized for the strip of map visible above the media sheet.
-    private func spiderwebRegion() -> MKCoordinateRegion? {
-        Self.spiderwebRegion(for: memory, sheetFraction: currentSheetFraction)
+    /// A camera that fits the main memory and every memory pinned inside it,
+    /// sized for the strip of map visible above the media sheet.
+    private func spiderwebViewport() -> Viewport? {
+        Self.spiderwebViewport(for: memory, sheetFraction: currentSheetFraction)
     }
 
     /// How much of the screen the media sheet currently covers from the bottom.
@@ -402,49 +521,25 @@ struct MemoryRoomView: View {
     }
 
     /// Frames the web in the visible band between the floating header and the
-    /// media sheet: zooms so the web's height fits the band, then shifts the
-    /// camera center so the web sits in that band instead of behind the sheet.
-    private static func spiderwebRegion(for memory: Memory, sheetFraction: Double) -> MKCoordinateRegion? {
+    /// media sheet by letting Mapbox fit all the pins with screen-proportional
+    /// padding: room for the header up top and for the media sheet below.
+    private static func spiderwebViewport(for memory: Memory, sheetFraction: Double) -> Viewport? {
         guard !memory.subMemories.isEmpty else { return nil }
-        var minLat = memory.centerCoordinate.latitude
-        var maxLat = minLat
-        var minLon = memory.centerCoordinate.longitude
-        var maxLon = minLon
-        for sub in memory.subMemories {
-            minLat = min(minLat, sub.coordinate.latitude)
-            maxLat = max(maxLat, sub.coordinate.latitude)
-            minLon = min(minLon, sub.coordinate.longitude)
-            maxLon = max(maxLon, sub.coordinate.longitude)
-        }
+        var coordinates = [memory.centerCoordinate]
+        coordinates.append(contentsOf: memory.subMemories.map(\.coordinate))
 
-        // Screen band (fractions from the top) the pins should occupy:
-        // below the header, above the sheet, with margin for the pin cards.
-        let bandTop = 0.30
-        let bandBottom = sheetFraction <= 0.2 ? 0.70 : 0.46
-        let bandHeight = bandBottom - bandTop
-
-        let webCenterLat = (minLat + maxLat) / 2
-        let webCenterLon = (minLon + maxLon) / 2
-
-        // Zoom out until the web's span fits the band vertically and ~60%
-        // of the screen width horizontally.
-        let latDelta = max((maxLat - minLat) / bandHeight, 0.02)
-        let lonDelta = max((maxLon - minLon) / 0.6, 0.02)
-
-        // MapKit shows whichever axis demands more zoom; estimate the final
-        // visible latitude window (portrait phone) so placement holds even
-        // when the web is wider than it is tall.
-        let aspect = 2.16
-        let lonAsLat = lonDelta * cos(webCenterLat * .pi / 180) * aspect
-        let visibleLat = max(latDelta, lonAsLat)
-
-        // Place the web's center at the band's center rather than mid-screen.
-        let bandCenter = (bandTop + bandBottom) / 2
-        let centerLat = webCenterLat - (0.5 - bandCenter) * visibleLat
-
-        return MKCoordinateRegion(
-            center: CLLocationCoordinate2D(latitude: centerLat, longitude: webCenterLon),
-            span: MKCoordinateSpan(latitudeDelta: visibleLat, longitudeDelta: lonDelta)
+        let screen = UIScreen.main.bounds
+        let bottomFraction: Double = sheetFraction <= 0.2 ? 0.30 : 0.54
+        let padding = EdgeInsets(
+            top: screen.height * 0.30,
+            leading: screen.width * 0.20,
+            bottom: screen.height * bottomFraction,
+            trailing: screen.width * 0.20
+        )
+        return .overview(
+            geometry: MultiPoint(coordinates),
+            geometryPadding: padding,
+            maxZoom: 16
         )
     }
 

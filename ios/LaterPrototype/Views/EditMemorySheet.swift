@@ -2,11 +2,13 @@ import SwiftUI
 import MapKit
 
 /// Lets the memory's owner edit its core details: title, description, date,
-/// and pinned location (via search or tapping the map).
+/// pinned location (via search or tapping the map), and an optional map style
+/// just for this memory.
 struct EditMemorySheet: View {
     let memoryID: UUID
     let viewModel: LaterViewModel
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(MapThemeOption.storageKey) private var globalThemeRaw: String = MapThemeOption.defaultTheme.rawValue
 
     @State private var title: String
     @State private var subtitle: String
@@ -16,6 +18,11 @@ struct EditMemorySheet: View {
     @State private var searchResults: [MKMapItem] = []
     @State private var mapPosition: MapCameraPosition
     @State private var resolvedAddress: String?
+    @State private var mapThemeRaw: String?
+    @State private var customStyleInput: String = ""
+    @State private var customStyleError: String?
+
+    private var previews: MapThemePreviewStore { .shared }
 
     init(memoryID: UUID, viewModel: LaterViewModel) {
         self.memoryID = memoryID
@@ -24,6 +31,7 @@ struct EditMemorySheet: View {
         _title = State(initialValue: memory?.title ?? "")
         _subtitle = State(initialValue: memory?.subtitle ?? "")
         _date = State(initialValue: memory?.date ?? Date())
+        _mapThemeRaw = State(initialValue: memory?.mapThemeOverrideRaw)
         let center = memory?.centerCoordinate ?? CLLocationCoordinate2D()
         _coordinate = State(initialValue: center)
         _mapPosition = State(initialValue: .region(MKCoordinateRegion(
@@ -144,6 +152,12 @@ struct EditMemorySheet: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
+
+                    if MapboxSetup.hasToken {
+                        fieldSection(header: "Map style") {
+                            mapStyleSection
+                        }
+                    }
                 }
                 .padding(16)
             }
@@ -162,7 +176,174 @@ struct EditMemorySheet: View {
                 }
             }
             .task { resolveAddress() }
+            .task { await previews.generateAll() }
+            .sensoryFeedback(.selection, trigger: mapThemeRaw)
         }
+    }
+
+    // MARK: - Map style picker
+
+    /// Lets this memory keep its own map look while everything else follows
+    /// the app-wide pick from Settings.
+    private var mapStyleSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    matchAppCard
+                    ForEach(MapThemeOption.allCases) { option in
+                        themeCard(option)
+                    }
+                }
+            }
+
+            if let raw = mapThemeRaw, MapThemeSelection.isCustomRaw(raw) {
+                activeCustomChip(raw)
+            }
+
+            customStyleField
+
+            Text("This memory's map follows your app-wide style unless you pick one just for it.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// The default: no override, so the memory always matches Settings.
+    private var matchAppCard: some View {
+        let globalOption = MapThemeOption(rawValue: globalThemeRaw)
+        return Button {
+            mapThemeRaw = nil
+        } label: {
+            themeCardBody(
+                image: globalOption.flatMap { previews.image(for: $0) },
+                fallbackIcon: globalOption == nil ? "paintpalette.fill" : nil,
+                label: "App setting",
+                isSelected: mapThemeRaw == nil
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func themeCard(_ option: MapThemeOption) -> some View {
+        Button {
+            mapThemeRaw = option.rawValue
+        } label: {
+            themeCardBody(
+                image: previews.image(for: option),
+                fallbackIcon: previews.hasFailed(option) ? "wifi.slash" : nil,
+                label: option.label,
+                isSelected: mapThemeRaw == option.rawValue
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func themeCardBody(image: UIImage?, fallbackIcon: String?, label: String, isSelected: Bool) -> some View {
+        Color(.secondarySystemBackground)
+            .frame(width: 128, height: 96)
+            .overlay {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .allowsHitTesting(false)
+                } else if let fallbackIcon {
+                    Image(systemName: fallbackIcon)
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ProgressView()
+                }
+            }
+            .overlay {
+                LinearGradient(
+                    colors: [.clear, .black.opacity(0.55)],
+                    startPoint: .center,
+                    endPoint: .bottom
+                )
+                .allowsHitTesting(false)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .contentShape(RoundedRectangle(cornerRadius: 14))
+            .overlay(alignment: .bottomLeading) {
+                Text(label)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .padding(8)
+            }
+            .overlay(alignment: .topTrailing) {
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.footnote)
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, Color.accentColor)
+                        .padding(6)
+                }
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 14)
+                    .strokeBorder(isSelected ? Color.accentColor : .clear, lineWidth: 2.5)
+            }
+            .animation(.spring(duration: 0.25), value: isSelected)
+    }
+
+    /// Shown while this memory uses a pasted community style.
+    private func activeCustomChip(_ raw: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "paintpalette.fill")
+                .font(.footnote)
+                .foregroundStyle(Color.accentColor)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Community style just for this memory")
+                    .font(.caption.weight(.semibold))
+                Text(MapThemeSelection.detail(forRaw: raw))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+            Button("Remove") { mapThemeRaw = nil }
+                .font(.caption.weight(.semibold))
+                .buttonStyle(.bordered)
+        }
+        .padding(10)
+        .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var customStyleField: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                TextField("Community style URL (optional)", text: $customStyleInput)
+                    .textFieldStyle(.roundedBorder)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.footnote)
+                    .onSubmit { applyCustomStyle() }
+
+                Button("Apply") { applyCustomStyle() }
+                    .font(.footnote.weight(.semibold))
+                    .buttonStyle(.bordered)
+                    .disabled(customStyleInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+
+            if let customStyleError {
+                Label(customStyleError, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+        }
+    }
+
+    private func applyCustomStyle() {
+        guard let raw = MapThemeSelection.normalizeCustomInput(customStyleInput) else {
+            customStyleError = "That doesn't look like a Mapbox style URL. In Mapbox Studio, use Share and copy the Style URL."
+            return
+        }
+        customStyleError = nil
+        customStyleInput = ""
+        mapThemeRaw = raw
     }
 
     private func fieldSection(header: String, @ViewBuilder content: () -> some View) -> some View {
@@ -210,7 +391,8 @@ struct EditMemorySheet: View {
             title: title.trimmingCharacters(in: .whitespaces),
             subtitle: subtitle.trimmingCharacters(in: .whitespaces),
             date: date,
-            coordinate: coordinate
+            coordinate: coordinate,
+            mapTheme: mapThemeRaw
         )
         dismiss()
     }

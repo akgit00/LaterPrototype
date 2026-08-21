@@ -28,11 +28,26 @@ class ProfileManager {
     /// survive logout and reinstalls. Falls back to whatever is cached locally.
     func configure(userID: String) async {
         self.userID = userID
+
+        // Restore the saved map theme with its own query so a failure on
+        // either side never blocks the other.
+        if let theme = await CloudMemoryService.fetchMapTheme(userID: userID), !theme.isEmpty {
+            UserDefaults.standard.set(theme, forKey: MapThemeOption.storageKey)
+        }
+
         guard let cloud = (try? await CloudMemoryService.fetchProfile(id: userID)) ?? nil else { return }
         if let name = cloud.display_name, !name.isEmpty { displayNameOverride = name }
         if let bio = cloud.bio, !bio.isEmpty { bioOverride = bio }
         if let avatar = cloud.avatar_url, !avatar.isEmpty { avatarLocalURL = avatar }
         persist()
+    }
+
+    /// Saves the user's app-wide map theme locally and to their cloud profile
+    /// so the pick survives reinstalls and follows them across devices.
+    func saveMapTheme(_ raw: String) {
+        UserDefaults.standard.set(raw, forKey: MapThemeOption.storageKey)
+        guard let userID else { return }
+        Task { await CloudMemoryService.updateMapTheme(userID: userID, raw: raw) }
     }
 
     /// Applies edited values, treating empty input as "use the default", then
