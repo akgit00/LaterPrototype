@@ -33,6 +33,14 @@ enum LabCity: String, CaseIterable, Identifiable {
     }
 }
 
+/// One active lens over the saved-styles shelf: everything, one look bucket,
+/// or one user folder.
+nonisolated private enum SavedStyleFilter: Hashable {
+    case all
+    case type(SavedStyleThemeType)
+    case folder(String)
+}
+
 /// Theme picker: a live preview of the current pick up top, and a grid of
 /// rendered map thumbnails below — tap any box to make it the globe's style.
 struct MapThemeLabView: View {
@@ -46,6 +54,10 @@ struct MapThemeLabView: View {
     @State private var saveNameInput = ""
     @State private var renamingStyleRaw: String?
     @State private var renameInput = ""
+    @State private var savedFilter: SavedStyleFilter = .all
+    @State private var comparingStyle: SavedMapStyle?
+    @State private var folderPromptRaw: String?
+    @State private var newFolderName = ""
 
     private var previews: MapThemePreviewStore { .shared }
 
@@ -112,6 +124,55 @@ struct MapThemeLabView: View {
                 renamingStyleRaw = nil
             }
             Button("Cancel", role: .cancel) { renamingStyleRaw = nil }
+        }
+        .alert("New folder", isPresented: Binding(
+            get: { folderPromptRaw != nil },
+            set: { if !$0 { folderPromptRaw = nil } }
+        )) {
+            TextField("Folder name", text: $newFolderName)
+            Button("Create") {
+                if let raw = folderPromptRaw {
+                    profile.setFolder(newFolderName, forStyleRaw: raw)
+                }
+                folderPromptRaw = nil
+            }
+            Button("Cancel", role: .cancel) { folderPromptRaw = nil }
+        } message: {
+            Text("Group related styles — the folder shows up as a filter above your library.")
+        }
+        .sheet(item: $comparingStyle) { style in
+            StyleCompareView(currentRaw: storedThemeRaw, candidate: style) { raw in
+                select(raw)
+            }
+        }
+        .sensoryFeedback(.selection, trigger: savedFilter)
+        .onChange(of: profile.savedMapStyles) { _, _ in
+            // Keep the filter meaningful when its last style is removed,
+            // re-filed, or re-typed away.
+            if savedFilter != .all, filteredSavedStyles.isEmpty {
+                withAnimation(.spring(duration: 0.3)) { savedFilter = .all }
+            }
+        }
+    }
+
+    // MARK: - Saved library filtering
+
+    /// Look buckets that currently have at least one saved style.
+    private var presentThemeTypes: [SavedStyleThemeType] {
+        SavedStyleThemeType.allCases.filter { type in
+            profile.savedMapStyles.contains { $0.effectiveThemeType == type }
+        }
+    }
+
+    /// The saved styles the active filter lets through.
+    private var filteredSavedStyles: [SavedMapStyle] {
+        switch savedFilter {
+        case .all:
+            return profile.savedMapStyles
+        case .type(let type):
+            return profile.savedMapStyles.filter { $0.effectiveThemeType == type }
+        case .folder(let folder):
+            return profile.savedMapStyles.filter { $0.folder == folder }
         }
     }
 
@@ -293,17 +354,22 @@ struct MapThemeLabView: View {
                 }
 
                 if !profile.savedMapStyles.isEmpty {
-                    Text("Your saved styles — tap to apply, hold to rename or remove:")
+                    Text("Your saved styles — tap to apply, hold to share, organize, or compare:")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
+                    if !presentThemeTypes.isEmpty || !profile.savedStyleFolders.isEmpty {
+                        savedFilterBar
+                    }
+
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 10) {
-                            ForEach(profile.savedMapStyles) { style in
+                            ForEach(filteredSavedStyles) { style in
                                 savedStyleCard(style)
                             }
                         }
                         .padding(.vertical, 2)
+                        .animation(.spring(duration: 0.3), value: filteredSavedStyles)
                     }
 
                     Divider()
@@ -450,6 +516,41 @@ struct MapThemeLabView: View {
         }
     }
 
+    /// Chip row that narrows the saved library to one look bucket or folder.
+    private var savedFilterBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                filterChip(.all, label: "All", icon: "square.grid.2x2")
+                ForEach(presentThemeTypes) { type in
+                    filterChip(.type(type), label: type.label, icon: type.icon)
+                }
+                ForEach(profile.savedStyleFolders, id: \.self) { folder in
+                    filterChip(.folder(folder), label: folder, icon: "folder.fill")
+                }
+            }
+            .padding(.vertical, 2)
+        }
+    }
+
+    private func filterChip(_ filter: SavedStyleFilter, label: String, icon: String) -> some View {
+        let isSelected = savedFilter == filter
+        return Button {
+            withAnimation(.spring(duration: 0.3)) { savedFilter = filter }
+        } label: {
+            Label(label, systemImage: icon)
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .foregroundStyle(isSelected ? .white : .primary)
+                .background(
+                    isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color(.tertiarySystemFill)),
+                    in: Capsule()
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
     /// One-tap card for a style the user bookmarked from a pasted link.
     private func savedStyleCard(_ style: SavedMapStyle) -> some View {
         let isSelected = storedThemeRaw == style.raw
@@ -457,10 +558,24 @@ struct MapThemeLabView: View {
             select(style.raw)
         } label: {
             VStack(alignment: .leading, spacing: 6) {
-                HStack {
+                HStack(spacing: 5) {
                     Image(systemName: "bookmark.fill")
                         .font(.footnote)
                         .foregroundStyle(Color.accentColor)
+                    if let type = style.effectiveThemeType {
+                        Image(systemName: type.icon)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let folder = style.folder {
+                        HStack(spacing: 3) {
+                            Image(systemName: "folder.fill")
+                            Text(folder)
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    }
                     Spacer()
                     if isSelected {
                         Image(systemName: "checkmark.circle.fill")
@@ -491,15 +606,69 @@ struct MapThemeLabView: View {
         .animation(.spring(duration: 0.25), value: isSelected)
         .contextMenu {
             Button {
+                comparingStyle = style
+            } label: {
+                Label("Compare with Current", systemImage: "rectangle.split.2x1")
+            }
+            ShareLink(item: MapThemeSelection.shareText(for: style)) {
+                Label("Share Style", systemImage: "square.and.arrow.up")
+            }
+            Divider()
+            Menu {
+                ForEach(SavedStyleThemeType.allCases) { type in
+                    Button {
+                        profile.setThemeType(type, forStyleRaw: style.raw)
+                    } label: {
+                        if style.effectiveThemeType == type {
+                            Label(type.label, systemImage: "checkmark")
+                        } else {
+                            Label(type.label, systemImage: type.icon)
+                        }
+                    }
+                }
+            } label: {
+                Label("Theme Type", systemImage: "tag")
+            }
+            Menu {
+                ForEach(profile.savedStyleFolders, id: \.self) { folder in
+                    Button {
+                        profile.setFolder(style.folder == folder ? nil : folder, forStyleRaw: style.raw)
+                    } label: {
+                        if style.folder == folder {
+                            Label(folder, systemImage: "checkmark")
+                        } else {
+                            Label(folder, systemImage: "folder")
+                        }
+                    }
+                }
+                Button {
+                    newFolderName = ""
+                    folderPromptRaw = style.raw
+                } label: {
+                    Label("New Folder…", systemImage: "folder.badge.plus")
+                }
+                if style.folder != nil {
+                    Divider()
+                    Button(role: .destructive) {
+                        profile.setFolder(nil, forStyleRaw: style.raw)
+                    } label: {
+                        Label("Remove from Folder", systemImage: "folder.badge.minus")
+                    }
+                }
+            } label: {
+                Label("Move to Folder", systemImage: "folder")
+            }
+            Button {
                 renameInput = style.name
                 renamingStyleRaw = style.raw
             } label: {
                 Label("Rename", systemImage: "pencil")
             }
+            Divider()
             Button(role: .destructive) {
                 profile.removeSavedStyle(raw: style.raw)
             } label: {
-                Label("Remove from saved", systemImage: "bookmark.slash")
+                Label("Remove from Saved", systemImage: "bookmark.slash")
             }
         }
     }
@@ -542,7 +711,8 @@ struct MapThemeLabView: View {
 }
 
 /// Mimics the app's memory pins so themes are judged with markers on top.
-private struct LabMemoryPin: View {
+/// Shared with the compare sheet so both render identical markers.
+struct LabMemoryPin: View {
     let emoji: String
     let tint: Color
 

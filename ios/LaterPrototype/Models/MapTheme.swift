@@ -129,6 +129,12 @@ enum MapboxGalleryCatalog {
         byRaw[raw]
     }
 
+    /// The gallery anchor slug for a stored style URL, used to build share
+    /// links that open the style's card on mapbox.com/gallery.
+    static func slug(forRaw raw: String) -> String? {
+        slugByRaw[raw]
+    }
+
     /// Lowercased, diacritic-folded, hyphen-separated form of a name:
     /// "Lè Shine" → "le-shine", "NASA's Black Marble" → "nasas-black-marble".
     private static func slugify(_ value: String) -> String {
@@ -155,6 +161,11 @@ enum MapboxGalleryCatalog {
 
     private static let byRaw: [String: Entry] = Dictionary(
         bySlug.values.map { ($0.raw, $0) },
+        uniquingKeysWith: { first, _ in first }
+    )
+
+    private static let slugByRaw: [String: String] = Dictionary(
+        bySlug.map { ($0.value.raw, $0.key) },
         uniquingKeysWith: { first, _ in first }
     )
 
@@ -261,6 +272,19 @@ enum MapThemeSelection {
         return label
     }
 
+    /// Ready-to-send text for sharing a saved style: the gallery link when
+    /// the style is a known gallery entry, plus the raw style URL — either
+    /// one can be pasted straight into the app's style fields.
+    static func shareText(for style: SavedMapStyle) -> String {
+        var lines = ["Map style: \(style.name)"]
+        if let slug = MapboxGalleryCatalog.slug(forRaw: style.raw) {
+            lines.append("Gallery link: https://www.mapbox.com/gallery#\(slug)")
+        }
+        lines.append("Style URL: \(style.raw)")
+        lines.append("Paste either one into Later's Map Themes to use this look.")
+        return lines.joined(separator: "\n")
+    }
+
     /// Normalizes a user-pasted style reference into a canonical
     /// `mapbox://styles/owner/id` URL. Accepts the native style URL, the
     /// Styles API form (`https://api.mapbox.com/styles/v1/owner/id`), and
@@ -333,14 +357,69 @@ enum MapThemeSelection {
     }
 }
 
+/// Broad look-and-feel buckets for saved styles so a growing library stays
+/// filterable — guessed from the style's name when recognizable, and
+/// adjustable from the card's long-press menu.
+nonisolated enum SavedStyleThemeType: String, Codable, Sendable, CaseIterable, Identifiable {
+    case light
+    case dark
+    case terrain
+    case colorful
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .light: "Light"
+        case .dark: "Dark"
+        case .terrain: "Terrain"
+        case .colorful: "Colorful"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .light: "sun.max.fill"
+        case .dark: "moon.stars.fill"
+        case .terrain: "mountain.2.fill"
+        case .colorful: "paintpalette.fill"
+        }
+    }
+
+    /// Best-effort bucket from a style's name, so fresh bookmarks land under
+    /// the right filter without any manual tagging.
+    static func guess(from name: String) -> SavedStyleThemeType? {
+        let lower = name.lowercased()
+        let buckets: [(SavedStyleThemeType, [String])] = [
+            (.terrain, ["terrain", "outdoor", "topo", "satellite", "winter", "mountain", "hill"]),
+            (.dark, ["dark", "night", "moon", "neon", "black", "midnight", "dusk"]),
+            (.light, ["light", "day", "bright", "shine", "ice", "pencil", "basic", "minimo"]),
+            (.colorful, ["unicorn", "color", "rainbow", "bubble", "cream", "warm", "cool"]),
+        ]
+        for (type, keywords) in buckets where keywords.contains(where: { lower.contains($0) }) {
+            return type
+        }
+        return nil
+    }
+}
+
 /// A community style the user bookmarked after pasting its link, so it can
 /// be re-applied anytime without hunting down the URL again. The collection
 /// is stored on the user's cloud profile and follows their account.
 nonisolated struct SavedMapStyle: Codable, Sendable, Identifiable, Equatable {
     var name: String
     let raw: String
+    /// User-created folder this style is filed under, if any.
+    var folder: String? = nil
+    /// Manually-set look bucket; when nil the name-based guess applies.
+    var themeType: SavedStyleThemeType? = nil
 
     var id: String { raw }
+
+    /// The bucket this style falls under in the library's filter bar.
+    var effectiveThemeType: SavedStyleThemeType? {
+        themeType ?? SavedStyleThemeType.guess(from: name)
+    }
 }
 
 /// Featured designer styles from the public style gallery, shown as one-tap

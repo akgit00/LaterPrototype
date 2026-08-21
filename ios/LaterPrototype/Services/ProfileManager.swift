@@ -79,8 +79,40 @@ class ProfileManager {
         if let index = savedMapStyles.firstIndex(where: { $0.raw == raw }) {
             savedMapStyles[index].name = finalName
         } else {
-            savedMapStyles.append(SavedMapStyle(name: finalName, raw: raw))
+            savedMapStyles.append(SavedMapStyle(
+                name: finalName,
+                raw: raw,
+                themeType: SavedStyleThemeType.guess(from: finalName)
+            ))
         }
+        persistAndSyncSavedStyles()
+    }
+
+    /// Folder names in use, in the order they first appear in the library.
+    var savedStyleFolders: [String] {
+        var seen = Set<String>()
+        var folders: [String] = []
+        for style in savedMapStyles {
+            if let folder = style.folder, !folder.isEmpty, seen.insert(folder).inserted {
+                folders.append(folder)
+            }
+        }
+        return folders
+    }
+
+    /// Files a style under a folder (nil removes it from its folder). Folders
+    /// exist implicitly — they live as long as one style uses them.
+    func setFolder(_ folder: String?, forStyleRaw raw: String) {
+        guard let index = savedMapStyles.firstIndex(where: { $0.raw == raw }) else { return }
+        let trimmed = folder?.trimmingCharacters(in: .whitespacesAndNewlines)
+        savedMapStyles[index].folder = (trimmed?.isEmpty ?? true) ? nil : trimmed
+        persistAndSyncSavedStyles()
+    }
+
+    /// Overrides the automatic look bucket for a style.
+    func setThemeType(_ type: SavedStyleThemeType?, forStyleRaw raw: String) {
+        guard let index = savedMapStyles.firstIndex(where: { $0.raw == raw }) else { return }
+        savedMapStyles[index].themeType = type
         persistAndSyncSavedStyles()
     }
 
