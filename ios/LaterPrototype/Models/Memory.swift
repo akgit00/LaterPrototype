@@ -192,6 +192,9 @@ nonisolated struct SubMemory: Identifiable, Sendable, Codable, Equatable {
     let id: UUID
     var title: String
     var date: Date
+    /// When set, the pinned memory spans from `date` through this day (a
+    /// weekend ride, a two-day hike). Nil means a single-day moment.
+    var endDate: Date?
     var coordinate: CLLocationCoordinate2D
     var photoURLs: [String]
     var videoIDs: [UUID]
@@ -200,6 +203,7 @@ nonisolated struct SubMemory: Identifiable, Sendable, Codable, Equatable {
         id: UUID = UUID(),
         title: String,
         date: Date = Date(),
+        endDate: Date? = nil,
         coordinate: CLLocationCoordinate2D,
         photoURLs: [String] = [],
         videoIDs: [UUID] = []
@@ -207,13 +211,14 @@ nonisolated struct SubMemory: Identifiable, Sendable, Codable, Equatable {
         self.id = id
         self.title = title
         self.date = date
+        self.endDate = endDate
         self.coordinate = coordinate
         self.photoURLs = photoURLs
         self.videoIDs = videoIDs
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, date, latitude, longitude, photoURLs, videoIDs
+        case id, title, date, endDate, latitude, longitude, photoURLs, videoIDs
     }
 
     nonisolated init(from decoder: Decoder) throws {
@@ -221,6 +226,7 @@ nonisolated struct SubMemory: Identifiable, Sendable, Codable, Equatable {
         id = try container.decode(UUID.self, forKey: .id)
         title = try container.decode(String.self, forKey: .title)
         date = try container.decode(Date.self, forKey: .date)
+        endDate = try container.decodeIfPresent(Date.self, forKey: .endDate)
         let latitude = try container.decode(Double.self, forKey: .latitude)
         let longitude = try container.decode(Double.self, forKey: .longitude)
         coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
@@ -233,6 +239,7 @@ nonisolated struct SubMemory: Identifiable, Sendable, Codable, Equatable {
         try container.encode(id, forKey: .id)
         try container.encode(title, forKey: .title)
         try container.encode(date, forKey: .date)
+        try container.encodeIfPresent(endDate, forKey: .endDate)
         try container.encode(coordinate.latitude, forKey: .latitude)
         try container.encode(coordinate.longitude, forKey: .longitude)
         try container.encode(photoURLs, forKey: .photoURLs)
@@ -243,10 +250,44 @@ nonisolated struct SubMemory: Identifiable, Sendable, Codable, Equatable {
         lhs.id == rhs.id
             && lhs.title == rhs.title
             && lhs.date == rhs.date
+            && lhs.endDate == rhs.endDate
             && lhs.coordinate.latitude == rhs.coordinate.latitude
             && lhs.coordinate.longitude == rhs.coordinate.longitude
             && lhs.photoURLs == rhs.photoURLs
             && lhs.videoIDs == rhs.videoIDs
+    }
+}
+
+nonisolated extension SubMemory {
+    /// Number of calendar days this pinned memory covers (1 = a single day).
+    var durationDayCount: Int {
+        guard let endDate else { return 1 }
+        let calendar = Calendar.current
+        let start = calendar.startOfDay(for: date)
+        let end = calendar.startOfDay(for: endDate)
+        let days = (calendar.dateComponents([.day], from: start, to: end).day ?? 0) + 1
+        return max(days, 1)
+    }
+
+    /// "Jun 5" for a single day, "Jun 5 – 7" or "Jun 28 – Jul 2" for a span.
+    var dateRangeText: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        guard let endDate, durationDayCount > 1 else {
+            return formatter.string(from: date)
+        }
+        if Calendar.current.isDate(date, equalTo: endDate, toGranularity: .month) {
+            let dayFormatter = DateFormatter()
+            dayFormatter.dateFormat = "d"
+            return "\(formatter.string(from: date)) – \(dayFormatter.string(from: endDate))"
+        }
+        return "\(formatter.string(from: date)) – \(formatter.string(from: endDate))"
+    }
+
+    /// "3 days" badge text, or nil for single-day pins.
+    var durationBadgeText: String? {
+        let days = durationDayCount
+        return days > 1 ? "\(days) days" : nil
     }
 }
 

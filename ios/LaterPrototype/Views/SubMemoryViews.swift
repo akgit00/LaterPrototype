@@ -11,6 +11,8 @@ struct SubMemoryEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var title: String
     @State private var date: Date
+    @State private var hasEndDate: Bool
+    @State private var endDate: Date
     @State private var coordinate: CLLocationCoordinate2D
     @State private var addressQuery: String = ""
     @State private var searchResults: [MKMapItem] = []
@@ -27,8 +29,13 @@ struct SubMemoryEditorSheet: View {
         self.existing = existing
         let memory = viewModel.memoryByID(memoryID)
         let center = existing?.coordinate ?? memory?.centerCoordinate ?? CLLocationCoordinate2D()
+        let startDate = existing?.date ?? memory?.date ?? Date()
         _title = State(initialValue: existing?.title ?? "")
-        _date = State(initialValue: existing?.date ?? memory?.date ?? Date())
+        _date = State(initialValue: startDate)
+        _hasEndDate = State(initialValue: existing?.endDate != nil)
+        _endDate = State(initialValue: existing?.endDate
+            ?? Calendar.current.date(byAdding: .day, value: 1, to: startDate)
+            ?? startDate)
         _coordinate = State(initialValue: center)
         _mapPosition = State(initialValue: .region(MKCoordinateRegion(
             center: center,
@@ -59,13 +66,40 @@ struct SubMemoryEditorSheet: View {
                             .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
                     }
 
-                    fieldSection(header: "Date") {
-                        DatePicker("", selection: $date, displayedComponents: [.date])
-                            .datePickerStyle(.compact)
-                            .labelsHidden()
-                            .padding(12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+                    fieldSection(header: "When") {
+                        VStack(spacing: 0) {
+                            DatePicker(hasEndDate ? "Starts" : "Date", selection: $date, displayedComponents: [.date])
+                                .datePickerStyle(.compact)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+
+                            Divider()
+                                .padding(.leading, 12)
+
+                            Toggle("Lasted more than a day", isOn: $hasEndDate.animation(.spring(duration: 0.3)))
+                                .tint(.red)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+
+                            if hasEndDate {
+                                Divider()
+                                    .padding(.leading, 12)
+                                DatePicker("Ends", selection: $endDate, in: date..., displayedComponents: [.date])
+                                    .datePickerStyle(.compact)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                            }
+                        }
+                        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+                        .onChange(of: date) { _, newValue in
+                            if endDate < newValue { endDate = newValue }
+                        }
+
+                        if hasEndDate {
+                            Label(durationPreview, systemImage: "calendar.badge.clock")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
 
                     fieldSection(header: "Spot") {
@@ -182,6 +216,15 @@ struct SubMemoryEditorSheet: View {
         }
     }
 
+    /// "3 days" readout under the date pickers while a span is set.
+    private var durationPreview: String {
+        let calendar = Calendar.current
+        let start = calendar.startOfDay(for: date)
+        let end = calendar.startOfDay(for: max(endDate, date))
+        let days = (calendar.dateComponents([.day], from: start, to: end).day ?? 0) + 1
+        return days == 1 ? "1 day" : "\(days) days"
+    }
+
     private func searchAddress() {
         guard !addressQuery.isEmpty else { return }
         let request = MKLocalSearch.Request()
@@ -226,16 +269,18 @@ struct SubMemoryEditorSheet: View {
     private func save() {
         let trimmed = title.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
+        let finalEndDate: Date? = hasEndDate ? max(endDate, date) : nil
         if let existing {
             viewModel.updateSubMemoryDetails(
                 memoryID: memoryID,
                 subMemoryID: existing.id,
                 title: trimmed,
                 coordinate: coordinate,
-                date: date
+                date: date,
+                endDate: finalEndDate
             )
         } else {
-            viewModel.addSubMemory(to: memoryID, title: trimmed, coordinate: coordinate, date: date)
+            viewModel.addSubMemory(to: memoryID, title: trimmed, coordinate: coordinate, date: date, endDate: finalEndDate)
         }
         dismiss()
     }
@@ -247,6 +292,8 @@ struct SubMemoryPinCard: View {
     let imageURL: String?
     let mediaCount: Int
     let isSelected: Bool
+    /// "3 days" chip for pins spanning multiple days, nil for single-day.
+    var durationText: String? = nil
 
     private var side: CGFloat { isSelected ? 82 : 64 }
 
@@ -290,6 +337,17 @@ struct SubMemoryPinCard: View {
                             .offset(x: 7, y: -7)
                     }
                 }
+                .overlay(alignment: .bottomLeading) {
+                    if let durationText {
+                        Text(durationText)
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(.black.opacity(0.55), in: Capsule())
+                            .padding(4)
+                    }
+                }
                 .shadow(color: .black.opacity(0.4), radius: 6, x: 0, y: 3)
 
             Image(systemName: "triangle.fill")
@@ -307,6 +365,8 @@ struct SubMemoryPinCard: View {
 struct MemoryHubPinCard: View {
     let imageURL: String?
     let isDimmed: Bool
+    /// How many memories are pinned inside, shown in the corner badge.
+    var insideCount: Int = 0
 
     var body: some View {
         VStack(spacing: 2) {
@@ -335,15 +395,23 @@ struct MemoryHubPinCard: View {
                         .stroke(.red, lineWidth: 3)
                 }
                 .overlay(alignment: .topLeading) {
-                    Image(systemName: "point.3.connected.trianglepath.dotted")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(5)
-                        .background(.red, in: Circle())
-                        .overlay {
-                            Circle().stroke(.white, lineWidth: 1)
+                    HStack(spacing: 3) {
+                        Image(systemName: "point.3.connected.trianglepath.dotted")
+                            .font(.system(size: 10, weight: .bold))
+                        if insideCount > 0 {
+                            Text("\(insideCount)")
+                                .font(.system(size: 11, weight: .bold))
+                                .monospacedDigit()
                         }
-                        .offset(x: -7, y: -7)
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                    .background(.red, in: Capsule())
+                    .overlay {
+                        Capsule().stroke(.white, lineWidth: 1)
+                    }
+                    .offset(x: -7, y: -7)
                 }
                 .shadow(color: .black.opacity(0.45), radius: 7, x: 0, y: 3)
                 .opacity(isDimmed ? 0.75 : 1)

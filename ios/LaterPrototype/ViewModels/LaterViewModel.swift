@@ -768,23 +768,24 @@ final class LaterViewModel {
 
     /// Pins a smaller memory inside a bigger one. Owner-only: sub-memories
     /// live in the memory payload, which only the owner may update.
-    func addSubMemory(to memoryID: UUID, title: String, coordinate: CLLocationCoordinate2D, date: Date) {
+    func addSubMemory(to memoryID: UUID, title: String, coordinate: CLLocationCoordinate2D, date: Date, endDate: Date? = nil) {
         guard isOwned(memoryID),
               let index = memories.firstIndex(where: { $0.id == memoryID }) else { return }
-        let sub = SubMemory(title: title, date: date, coordinate: coordinate)
+        let sub = SubMemory(title: title, date: date, endDate: endDate, coordinate: coordinate)
         memories[index].subMemories.append(sub)
         persist()
         schedulePayloadPush(memoryID)
     }
 
-    /// Edits a pinned memory's title, spot, or date (owner-only).
-    func updateSubMemoryDetails(memoryID: UUID, subMemoryID: UUID, title: String, coordinate: CLLocationCoordinate2D, date: Date) {
+    /// Edits a pinned memory's title, spot, date, or duration (owner-only).
+    func updateSubMemoryDetails(memoryID: UUID, subMemoryID: UUID, title: String, coordinate: CLLocationCoordinate2D, date: Date, endDate: Date? = nil) {
         guard isOwned(memoryID),
               let index = memories.firstIndex(where: { $0.id == memoryID }),
               let subIndex = memories[index].subMemories.firstIndex(where: { $0.id == subMemoryID }) else { return }
         memories[index].subMemories[subIndex].title = title
         memories[index].subMemories[subIndex].coordinate = coordinate
         memories[index].subMemories[subIndex].date = date
+        memories[index].subMemories[subIndex].endDate = endDate
         persist()
         schedulePayloadPush(memoryID)
     }
