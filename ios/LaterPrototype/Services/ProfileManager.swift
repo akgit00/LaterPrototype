@@ -109,6 +109,29 @@ class ProfileManager {
         persistAndSyncSavedStyles()
     }
 
+    /// Renames a folder across every style filed in it. Renaming onto an
+    /// existing folder's name merges the two.
+    func renameFolder(_ oldName: String, to newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != oldName else { return }
+        var changed = false
+        for index in savedMapStyles.indices where savedMapStyles[index].folder == oldName {
+            savedMapStyles[index].folder = trimmed
+            changed = true
+        }
+        if changed { persistAndSyncSavedStyles() }
+    }
+
+    /// Disbands a folder — the styles inside stay saved, just unfiled.
+    func deleteFolder(_ name: String) {
+        var changed = false
+        for index in savedMapStyles.indices where savedMapStyles[index].folder == name {
+            savedMapStyles[index].folder = nil
+            changed = true
+        }
+        if changed { persistAndSyncSavedStyles() }
+    }
+
     /// Overrides the automatic look bucket for a style.
     func setThemeType(_ type: SavedStyleThemeType?, forStyleRaw raw: String) {
         guard let index = savedMapStyles.firstIndex(where: { $0.raw == raw }) else { return }

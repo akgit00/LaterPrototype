@@ -58,6 +58,8 @@ struct MapThemeLabView: View {
     @State private var comparingStyle: SavedMapStyle?
     @State private var folderPromptRaw: String?
     @State private var newFolderName = ""
+    @State private var renamingFolder: String?
+    @State private var folderRenameInput = ""
 
     private var previews: MapThemePreviewStore { .shared }
 
@@ -139,6 +141,25 @@ struct MapThemeLabView: View {
             Button("Cancel", role: .cancel) { folderPromptRaw = nil }
         } message: {
             Text("Group related styles — the folder shows up as a filter above your library.")
+        }
+        .alert("Rename folder", isPresented: Binding(
+            get: { renamingFolder != nil },
+            set: { if !$0 { renamingFolder = nil } }
+        )) {
+            TextField("Folder name", text: $folderRenameInput)
+            Button("Save") {
+                if let oldName = renamingFolder {
+                    let newName = folderRenameInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                    profile.renameFolder(oldName, to: newName)
+                    if !newName.isEmpty, savedFilter == .folder(oldName) {
+                        savedFilter = .folder(newName)
+                    }
+                }
+                renamingFolder = nil
+            }
+            Button("Cancel", role: .cancel) { renamingFolder = nil }
+        } message: {
+            Text("Every style filed in this folder moves with it.")
         }
         .sheet(item: $comparingStyle) { style in
             StyleCompareView(currentRaw: storedThemeRaw, candidate: style) { raw in
@@ -526,6 +547,22 @@ struct MapThemeLabView: View {
                 }
                 ForEach(profile.savedStyleFolders, id: \.self) { folder in
                     filterChip(.folder(folder), label: folder, icon: "folder.fill")
+                        .contextMenu {
+                            Button {
+                                folderRenameInput = folder
+                                renamingFolder = folder
+                            } label: {
+                                Label("Rename Folder", systemImage: "pencil")
+                            }
+                            Button(role: .destructive) {
+                                profile.deleteFolder(folder)
+                                if savedFilter == .folder(folder) {
+                                    savedFilter = .all
+                                }
+                            } label: {
+                                Label("Delete Folder", systemImage: "folder.badge.minus")
+                            }
+                        }
                 }
             }
             .padding(.vertical, 2)
