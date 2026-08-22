@@ -14,6 +14,11 @@ struct ContentView: View {
     @State private var routedChatFriend: Connection?
     @State private var routedMemoryID: UUID?
     @State private var hasCompletedInitialSync = false
+    /// A collection share link waiting for the user to confirm the import.
+    @State private var pendingImport: SharedCollectionPayload?
+    /// People search is a sheet rather than a tab so the five main
+    /// destinations all fit on the bar without an overflow "More" menu.
+    @State private var showUserSearch: Bool = false
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -27,7 +32,7 @@ struct ContentView: View {
 
             Tab("Messages", systemImage: "message", value: 2) {
                 MessagesView(viewModel: viewModel) {
-                    selectedTab = 1
+                    showUserSearch = true
                 }
             }
             .badge(viewModel.totalUnread)
@@ -37,11 +42,9 @@ struct ContentView: View {
             }
 
             Tab("Profile", systemImage: "person.crop.circle", value: 4) {
-                ProfileView(viewModel: viewModel)
-            }
-
-            Tab("Search", systemImage: "magnifyingglass", value: 1, role: .search) {
-                UserSearchView(viewModel: viewModel)
+                ProfileView(viewModel: viewModel) {
+                    showUserSearch = true
+                }
             }
         }
         .tint(.blue)
@@ -104,6 +107,20 @@ struct ContentView: View {
         }
         .fullScreenCover(item: $routedMemoryID) { memoryID in
             MemoryRoomView(memoryID: memoryID, viewModel: viewModel)
+        }
+        // Collection share links (laterprototype://collection?d=...) show an
+        // import preview, then land on the Collections tab.
+        .onOpenURL { url in
+            guard let payload = CollectionShareCodec.decode(url: url) else { return }
+            pendingImport = payload
+        }
+        .sheet(isPresented: $showUserSearch) {
+            UserSearchView(viewModel: viewModel)
+        }
+        .sheet(item: $pendingImport) { payload in
+            CollectionImportSheet(payload: payload, viewModel: viewModel) {
+                selectedTab = 5
+            }
         }
     }
 

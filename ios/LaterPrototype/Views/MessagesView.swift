@@ -4,7 +4,7 @@ import SwiftUI
 /// activity first, so messages are one tap away instead of buried in Profile.
 struct MessagesView: View {
     let viewModel: LaterViewModel
-    /// Jumps to the Search tab so the user can find people to message.
+    /// Opens people search so the user can find someone to message.
     let onFindFriends: () -> Void
 
     @State private var chatFriend: Connection?
@@ -38,6 +38,16 @@ struct MessagesView: View {
                 }
             }
             .navigationTitle("Messages")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        onFindFriends()
+                    } label: {
+                        Image(systemName: "magnifyingglass")
+                    }
+                    .accessibilityLabel("Find people")
+                }
+            }
             .task {
                 await viewModel.loadUnreadCounts()
             }

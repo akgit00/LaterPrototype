@@ -4,6 +4,8 @@ import UIKit
 
 struct ProfileView: View {
     let viewModel: LaterViewModel
+    /// Opens people search, which lives as a sheet instead of its own tab.
+    var onFindPeople: () -> Void = {}
     @Environment(AuthManager.self) private var auth
     @Environment(ProfileManager.self) private var profile
     @State private var selectedSegment: ProfileSegment = .timeline
@@ -158,6 +160,14 @@ struct ProfileView: View {
                             Image(systemName: "person.badge.plus")
                         }
                     }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        onFindPeople()
+                    } label: {
+                        Image(systemName: "magnifyingglass")
+                    }
+                    .accessibilityLabel("Find people")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
