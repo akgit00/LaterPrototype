@@ -19,6 +19,10 @@ final class NotificationRouter {
     /// Cleared by the tab once it switches.
     var showCapsuleHistory: Bool = false
 
+    /// Set when a year-wrap unlock notification is tapped, so the Collections
+    /// tab opens that year's Wrapped story. Cleared once it opens.
+    var pendingWrapYear: Int?
+
     private init() {}
 
     func open(threadID: String) {
