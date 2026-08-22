@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// The Collections tab: automatic end-of-year wraps up top, followed by the
 /// user's own collections — eras, trip series, anything worth grouping.
@@ -8,6 +9,10 @@ struct CollectionsView: View {
     @State private var editorTarget: CollectionEditorTarget?
     @State private var openedDisplay: CollectionDisplay?
     @State private var collectionToDelete: LifeCollection?
+    @State private var collectionToRename: LifeCollection?
+    @State private var renameText: String = ""
+    @State private var importPayload: SharedCollectionPayload?
+    @State private var showNoLinkAlert: Bool = false
     /// Watches for tapped year-wrap notifications to open that year's story.
     @State private var router = NotificationRouter.shared
 
@@ -30,6 +35,13 @@ struct CollectionsView: View {
             }
             .navigationTitle("Collections")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        importFromClipboard()
+                    } label: {
+                        Image(systemName: "square.and.arrow.down")
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         editorTarget = .create
@@ -65,6 +77,37 @@ struct CollectionsView: View {
             } message: {
                 Text("The memories inside stay untouched — only the collection goes away.")
             }
+            .sheet(item: $importPayload) { payload in
+                CollectionImportSheet(payload: payload, viewModel: viewModel)
+            }
+            .alert("Rename Collection", isPresented: Binding(
+                get: { collectionToRename != nil },
+                set: { if !$0 { collectionToRename = nil } }
+            )) {
+                TextField("Name", text: $renameText)
+                Button("Save") {
+                    if let collection = collectionToRename {
+                        viewModel.renameLifeCollection(id: collection.id, to: renameText)
+                    }
+                    collectionToRename = nil
+                }
+                Button("Cancel", role: .cancel) { collectionToRename = nil }
+            }
+            .alert("No collection link found", isPresented: $showNoLinkAlert) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("Copy a shared collection link (or the whole message it came in), then tap Import again.")
+            }
+        }
+    }
+
+    /// Reads a pasted share link from the clipboard and previews the import.
+    private func importFromClipboard() {
+        if let text = UIPasteboard.general.string,
+           let payload = CollectionShareCodec.decode(text: text) {
+            importPayload = payload
+        } else {
+            showNoLinkAlert = true
         }
     }
 
@@ -127,6 +170,17 @@ struct CollectionsView: View {
                             editorTarget = .edit(collection)
                         } label: {
                             Label("Edit Collection", systemImage: "pencil")
+                        }
+                        Button {
+                            renameText = collection.name
+                            collectionToRename = collection
+                        } label: {
+                            Label("Rename", systemImage: "character.cursor.ibeam")
+                        }
+                        if let message = CollectionShareCodec.shareMessage(for: collection) {
+                            ShareLink(item: message) {
+                                Label("Share Collection", systemImage: "square.and.arrow.up")
+                            }
                         }
                         Button(role: .destructive) {
                             collectionToDelete = collection
@@ -574,11 +628,15 @@ struct CollectionEditorSheet: View {
     private func save() {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        // Keep member ids in date order so the web thread reads chronologically.
-        let orderedIDs = viewModel.memories
-            .filter { selectedIDs.contains($0.id) }
+        // Existing members keep the user's arrangement (including drag-and-
+        // drop reorders); newly added ones append at the end in date order.
+        let keptOrder = (existing?.memoryIDs ?? []).filter { selectedIDs.contains($0) }
+        let keptSet = Set(keptOrder)
+        let added = viewModel.memories
+            .filter { selectedIDs.contains($0.id) && !keptSet.contains($0.id) }
             .sorted { $0.date < $1.date }
             .map { $0.id }
+        let orderedIDs = keptOrder + added
         let collection = LifeCollection(
             id: existing?.id ?? UUID(),
             name: trimmed,

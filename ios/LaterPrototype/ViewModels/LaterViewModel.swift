@@ -1930,10 +1930,12 @@ final class LaterViewModel {
         YearWrap.build(from: memories)
     }
 
-    /// A collection's member memories, oldest first.
+    /// A collection's member memories, in the collection's own order. New
+    /// collections start chronological; the user can drag memories into any
+    /// arrangement, which persists here.
     func memories(in collection: LifeCollection) -> [Memory] {
-        let ids = Set(collection.memoryIDs)
-        return memories.filter { ids.contains($0.id) }.sorted { $0.date < $1.date }
+        let byID = Dictionary(memories.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return collection.memoryIDs.compactMap { byID[$0] }
     }
 
     /// Pulls the user's collections from the cloud. Skipped while a local
@@ -1983,6 +1985,45 @@ final class LaterViewModel {
         lifeCollections[index] = collection
         LifeCollectionStore.save(lifeCollections)
         pushLifeCollection(collection)
+    }
+
+    /// Renames a collection everywhere it appears (cards, detail, cloud).
+    func renameLifeCollection(id: UUID, to newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              var collection = lifeCollections.first(where: { $0.id == id }),
+              collection.name != trimmed else { return }
+        collection.name = trimmed
+        saveLifeCollection(collection)
+    }
+
+    /// Saves a user-arranged memory order for a collection. `visibleIDs` is
+    /// the new on-screen order; members hidden from this user (not shared
+    /// with them) keep their spots at the end.
+    func reorderLifeCollection(id: UUID, visibleIDs: [UUID]) {
+        guard let index = lifeCollections.firstIndex(where: { $0.id == id }) else { return }
+        var collection = lifeCollections[index]
+        let visibleSet = Set(visibleIDs)
+        let hidden = collection.memoryIDs.filter { !visibleSet.contains($0) }
+        let newOrder = visibleIDs + hidden
+        guard newOrder != collection.memoryIDs else { return }
+        collection.memoryIDs = newOrder
+        saveLifeCollection(collection)
+    }
+
+    /// Rebuilds a collection from a share link as the user's own copy (fresh
+    /// id, so it never collides with the sender's row). Only memories shared
+    /// with this user will actually render inside it.
+    @discardableResult
+    func importSharedCollection(_ payload: SharedCollectionPayload) -> LifeCollection {
+        let collection = LifeCollection(
+            name: payload.name,
+            emoji: payload.emoji,
+            colorName: payload.colorName,
+            memoryIDs: payload.memoryIDs
+        )
+        saveLifeCollection(collection)
+        return collection
     }
 
     /// Uploads a collection while marking the push as in flight (see

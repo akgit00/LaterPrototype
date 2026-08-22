@@ -106,7 +106,8 @@ nonisolated struct CollectionDisplay: Identifiable, Sendable {
     let subtitle: String
     let emoji: String
     let colorName: String
-    /// Member memories, oldest first.
+    /// Member memories, in display order (chronological for year wraps,
+    /// the user's own arrangement for custom collections).
     let memories: [Memory]
     /// Set for auto year wraps.
     let year: Int?
@@ -118,14 +119,15 @@ nonisolated struct CollectionDisplay: Identifiable, Sendable {
     let opensInWrapped: Bool
 
     static func from(_ collection: LifeCollection, memories: [Memory]) -> CollectionDisplay {
-        let sorted = memories.sorted { $0.date < $1.date }
-        return CollectionDisplay(
+        // The caller's order IS the collection's order — never re-sort, so
+        // drag-and-drop arrangements survive.
+        CollectionDisplay(
             id: "custom-\(collection.id.uuidString)",
             title: collection.name,
-            subtitle: Self.rangeText(for: sorted) ?? "No memories yet",
+            subtitle: Self.rangeText(for: memories) ?? "No memories yet",
             emoji: collection.emoji,
             colorName: collection.colorName,
-            memories: sorted,
+            memories: memories,
             year: nil,
             isInProgressYear: false,
             customID: collection.id,
@@ -148,9 +150,10 @@ nonisolated struct CollectionDisplay: Identifiable, Sendable {
         )
     }
 
-    /// "Jun 2024 – Mar 2025" from the members' date span.
-    private static func rangeText(for sorted: [Memory]) -> String? {
-        guard let first = sorted.first?.date, let last = sorted.last?.date else { return nil }
+    /// "Jun 2024 – Mar 2025" from the members' date span (order-independent).
+    private static func rangeText(for memories: [Memory]) -> String? {
+        let dates = memories.map { $0.date }
+        guard let first = dates.min(), let last = dates.max() else { return nil }
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM yyyy"
         let start = formatter.string(from: first)
