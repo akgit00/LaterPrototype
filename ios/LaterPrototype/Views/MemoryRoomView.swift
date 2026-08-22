@@ -63,6 +63,9 @@ struct MemoryRoomView: View {
     /// Opens the weather & mood editor (presented from the media sheet, since
     /// it is always on screen and owns sheet presentation).
     @State private var showWeatherSheet: Bool = false
+    /// Creates a new life collection pre-seeded with this memory (from the
+    /// header's "Add to Collection" menu).
+    @State private var showNewLifeCollectionSheet: Bool = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var previewPlayer: PreviewPlayerService { .shared }
@@ -568,6 +571,7 @@ struct MemoryRoomView: View {
                     } label: {
                         Label("Share", systemImage: "square.and.arrow.up")
                     }
+                    addToCollectionMenu
                     if viewModel.isOwner(of: memoryID) {
                         Button {
                             showEditMemorySheet = true
@@ -657,6 +661,38 @@ struct MemoryRoomView: View {
             }
         }
         .padding(.top, 4)
+        .sheet(isPresented: $showNewLifeCollectionSheet) {
+            CollectionEditorSheet(viewModel: viewModel, existing: nil, preselectedIDs: [memoryID])
+        }
+    }
+
+    /// Submenu listing the user's collections — tapping one adds or removes
+    /// this memory (collections are personal, so guests can use it too).
+    private var addToCollectionMenu: some View {
+        Menu {
+            ForEach(viewModel.lifeCollections) { collection in
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    viewModel.toggleMemory(memoryID, in: collection.id)
+                } label: {
+                    if collection.memoryIDs.contains(memoryID) {
+                        Label("\(collection.emoji) \(collection.name)", systemImage: "checkmark")
+                    } else {
+                        Text("\(collection.emoji) \(collection.name)")
+                    }
+                }
+            }
+            if !viewModel.lifeCollections.isEmpty {
+                Divider()
+            }
+            Button {
+                showNewLifeCollectionSheet = true
+            } label: {
+                Label("New Collection…", systemImage: "plus")
+            }
+        } label: {
+            Label("Add to Collection", systemImage: "square.stack.3d.up")
+        }
     }
 
     /// Shuffle-play for the memory's music: taps play a random attached
