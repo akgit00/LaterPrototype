@@ -14,6 +14,10 @@ struct WorldMapView: View {
     @State private var selectedMemoryID: UUID?
     @State private var showCreateMemory: Bool = false
     @State private var timelineHeight: CGFloat = 0
+    @State private var showSearch: Bool = false
+    /// The memory picked in the search sheet; applied once the sheet closes
+    /// (fly the globe there, then open its room).
+    @State private var searchTarget: Memory?
 
     private var location: LocationService { .shared }
 
@@ -32,6 +36,17 @@ struct WorldMapView: View {
                 HStack {
                     Spacer()
                     VStack(spacing: 10) {
+                        Button {
+                            showSearch = true
+                        } label: {
+                            Image(systemName: "magnifyingglass")
+                                .font(.body.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 44, height: 44)
+                                .background(.ultraThinMaterial, in: Circle())
+                                .shadow(color: .black.opacity(0.3), radius: 8, x: 0, y: 4)
+                        }
+
                         Button {
                             centerOnMyLocation()
                         } label: {
@@ -86,6 +101,20 @@ struct WorldMapView: View {
         .sheet(isPresented: $showCreateMemory) {
             CreateMemoryView(viewModel: viewModel)
                 .presentationDetents([.large])
+        }
+        .sheet(isPresented: $showSearch, onDismiss: {
+            guard let memory = searchTarget else { return }
+            searchTarget = nil
+            flyTo(
+                center: memory.centerCoordinate,
+                zoom: MapCameraMath.zoom(forSpanDelta: max(memory.spanDelta, 0.05))
+            )
+            selectedMemoryID = memory.id
+        }) {
+            MemorySearchSheet(viewModel: viewModel) { memory in
+                searchTarget = memory
+                showSearch = false
+            }
         }
         .onAppear {
             location.requestLocation()
