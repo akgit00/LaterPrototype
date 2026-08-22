@@ -13,6 +13,10 @@ final class LaterViewModel {
 
     var allConnections: [Connection] = []
 
+    /// The user's top-level collections (eras, trip series, anything) —
+    /// private to them and synced through the `user_collections` table.
+    var lifeCollections: [LifeCollection] = []
+
     /// The `connections` table row id for each accepted friend, so a friend
     /// can be removed from their profile.
     private(set) var friendRowIDs: [UUID: UUID] = [:]
@@ -86,6 +90,11 @@ final class LaterViewModel {
     /// be wiped off screen by stale data.
     private var pendingPayloadPushes: [UUID: Int] = [:]
 
+    /// Number of collection uploads in flight. While non-zero, cloud pulls
+    /// keep the local collections so a fresh edit can't be overwritten by a
+    /// stale server copy fetched before the push landed.
+    private var pendingCollectionPushes: Int = 0
+
     enum Tab: String {
         case explore
         case timeCapsules
@@ -123,6 +132,9 @@ final class LaterViewModel {
             memories = stored
             rebuildGlobalPins()
         }
+        if let storedCollections = LifeCollectionStore.load() {
+            lifeCollections = storedCollections
+        }
     }
 
     // MARK: - Cloud configuration & sync
@@ -139,6 +151,9 @@ final class LaterViewModel {
             memories = []
             ownedMemoryIDs = []
             MemoryStore.save([])
+            lifeCollections = []
+            LifeCollectionStore.save([])
+            YearWrapReminderService.cancelAll()
             rebuildGlobalPins()
             UserDefaults.standard.set(userID, forKey: lastUserKey)
         }
@@ -163,6 +178,7 @@ final class LaterViewModel {
             }
         }
         await loadConnections()
+        await loadLifeCollections()
 
         // Migrate / push local memories (all locally-created memories are mine).
         for memory in memories {
@@ -187,6 +203,7 @@ final class LaterViewModel {
         guard let userID = currentUserID, SupabaseREST.hasSession else { return }
         guard !isSyncing else { return }
         await loadConnections()
+        await loadLifeCollections()
         await pullCloudState(userID: userID)
     }
 
@@ -1902,6 +1919,85 @@ final class LaterViewModel {
         let colors = ConnectionColor.allCases
         let hash = abs(id.hashValue)
         return colors[hash % colors.count]
+    }
+
+    // MARK: - Life collections
+
+    /// Auto end-of-year wraps built from the visible memories, newest first.
+    /// Completed years arrive automatically; the current year rides along as
+    /// an in-progress teaser.
+    var yearWraps: [YearWrap] {
+        YearWrap.build(from: memories)
+    }
+
+    /// A collection's member memories, oldest first.
+    func memories(in collection: LifeCollection) -> [Memory] {
+        let ids = Set(collection.memoryIDs)
+        return memories.filter { ids.contains($0.id) }.sorted { $0.date < $1.date }
+    }
+
+    /// Pulls the user's collections from the cloud. Skipped while a local
+    /// edit is still uploading so fresh changes can't be rolled back by a
+    /// stale fetch.
+    @MainActor
+    func loadLifeCollections() async {
+        guard SupabaseREST.hasSession, pendingCollectionPushes == 0 else { return }
+        do {
+            let fetched = try await LifeCollectionService.fetchAll()
+            if pendingCollectionPushes == 0, fetched != lifeCollections {
+                lifeCollections = fetched
+                LifeCollectionStore.save(fetched)
+            }
+        } catch {
+            syncError = "Collections: \(error.localizedDescription)"
+        }
+    }
+
+    /// Creates or rewrites a collection locally, then pushes it to the cloud.
+    func saveLifeCollection(_ collection: LifeCollection) {
+        if let index = lifeCollections.firstIndex(where: { $0.id == collection.id }) {
+            lifeCollections[index] = collection
+        } else {
+            lifeCollections.insert(collection, at: 0)
+        }
+        LifeCollectionStore.save(lifeCollections)
+        pushLifeCollection(collection)
+    }
+
+    func deleteLifeCollection(id: UUID) {
+        lifeCollections.removeAll { $0.id == id }
+        LifeCollectionStore.save(lifeCollections)
+        guard SupabaseREST.hasSession else { return }
+        Task { try? await LifeCollectionService.delete(id: id) }
+    }
+
+    /// Adds or removes one memory from a collection.
+    func toggleMemory(_ memoryID: UUID, in collectionID: UUID) {
+        guard let index = lifeCollections.firstIndex(where: { $0.id == collectionID }) else { return }
+        var collection = lifeCollections[index]
+        if let existing = collection.memoryIDs.firstIndex(of: memoryID) {
+            collection.memoryIDs.remove(at: existing)
+        } else {
+            collection.memoryIDs.append(memoryID)
+        }
+        lifeCollections[index] = collection
+        LifeCollectionStore.save(lifeCollections)
+        pushLifeCollection(collection)
+    }
+
+    /// Uploads a collection while marking the push as in flight (see
+    /// `pendingCollectionPushes`).
+    private func pushLifeCollection(_ collection: LifeCollection) {
+        guard let userID = currentUserID, SupabaseREST.hasSession else { return }
+        pendingCollectionPushes += 1
+        Task { @MainActor in
+            defer { pendingCollectionPushes = max(pendingCollectionPushes - 1, 0) }
+            do {
+                try await LifeCollectionService.upsert(collection, ownerID: userID)
+            } catch {
+                syncError = "Collections: \(error.localizedDescription)"
+            }
+        }
     }
 
     // MARK: - Lookups

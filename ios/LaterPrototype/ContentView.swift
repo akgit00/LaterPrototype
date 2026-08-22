@@ -21,8 +21,8 @@ struct ContentView: View {
                 WorldMapView(viewModel: viewModel)
             }
 
-            Tab("Search", systemImage: "magnifyingglass", value: 1) {
-                UserSearchView(viewModel: viewModel)
+            Tab("Collections", systemImage: "square.stack.3d.up.fill", value: 5) {
+                CollectionsView(viewModel: viewModel)
             }
 
             Tab("Messages", systemImage: "message", value: 2) {
@@ -39,6 +39,10 @@ struct ContentView: View {
             Tab("Profile", systemImage: "person.crop.circle", value: 4) {
                 ProfileView(viewModel: viewModel)
             }
+
+            Tab("Search", systemImage: "magnifyingglass", value: 1, role: .search) {
+                UserSearchView(viewModel: viewModel)
+            }
         }
         .tint(.blue)
         .task(id: auth.user?.id) {
@@ -50,6 +54,9 @@ struct ContentView: View {
             // Data is ready — resolve any notification tapped before/at launch.
             hasCompletedInitialSync = true
             routePendingNotification()
+            // Keep the Dec 31 "your year is wrapped" notification in step
+            // with the freshly synced memories.
+            await YearWrapReminderService.refreshSchedule(memories: viewModel.memories)
         }
         // Periodically poll the cloud while the app is active so new comments,
         // friend requests and shared memories appear without a restart. Friend
@@ -82,7 +89,10 @@ struct ContentView: View {
             // The app shows all current state once open, so the icon badge is
             // stale by definition.
             UNUserNotificationCenter.current().setBadgeCount(0)
-            Task { await viewModel.refresh() }
+            Task {
+                await viewModel.refresh()
+                await YearWrapReminderService.refreshSchedule(memories: viewModel.memories)
+            }
         }
         // Route notification taps to their source: the chat for a message,
         // the memory room for shares and comments.
@@ -102,6 +112,19 @@ struct ContentView: View {
     /// comments, or the Profile tab (requests + conversations) as a fallback.
     private func routePendingNotification() {
         guard let threadID = router.pendingThreadID else { return }
+
+        // Year-wrap notifications route to the Collections tab, which opens
+        // that year's Wrapped story. Waits for the first sync so the wrap's
+        // memories exist before the story plays.
+        if let wrapYear = YearWrapReminderService.year(fromThreadID: threadID) {
+            guard hasCompletedInitialSync else { return }
+            router.pendingThreadID = nil
+            routedChatFriend = nil
+            routedMemoryID = nil
+            router.pendingWrapYear = wrapYear
+            selectedTab = 5
+            return
+        }
 
         // Capsule-unlock pushes carry the "capsules" thread and route straight
         // to the Capsules tab, which refreshes itself on appear.
